@@ -1,0 +1,39 @@
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap');
+@import "tailwindcss";
+
+html, body, #root {
+  width: 100%;
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+}
+
+.f-display { font-family: 'Space Grotesk', sans-serif; }
+.f-body { font-family: 'Inter', sans-serif; }
+.f-mono { font-family: 'IBM Plex Mono', monospace; }
+
+.contour-bg {
+  background-image:
+    radial-gradient(circle at 15% 20%, transparent 78px, rgba(226,92,29,0.15) 79px, rgba(226,92,29,0.15) 80px, transparent 81px),
+    radial-gradient(circle at 15% 20%, transparent 128px, rgba(245,242,235,0.08) 129px, rgba(245,242,235,0.08) 130px, transparent 131px),
+    radial-gradient(circle at 85% 80%, transparent 98px, rgba(226,92,29,0.12) 99px, rgba(226,92,29,0.12) 100px, transparent 101px);
+}
+.grid-bg {
+  background-image: linear-gradient(rgba(90,102,114,0.1) 1px, transparent 1px), linear-gradient(90deg, rgba(90,102,114,0.1) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+
+.card-hover {
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+.card-hover:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 10px 20px -5px rgba(15, 33, 55, 0.1);
+}
+
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+
+::selection { background: #E25C1D; color: white; }
