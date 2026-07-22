@@ -39,38 +39,40 @@ const SERVICES = [
 ];
 
 const EMPLOYEES = [
-  { id: "e1", name: "Rajesh Kumar", role: "Survey Lead", initials: "RK" },
-  { id: "e2", name: "Sonu Sharma", role: "Structural Design", initials: "SS" },
-  { id: "e3", name: "Narender Kumar", role: "Highway Design", initials: "NK" },
-  { id: "e4", name: "Komal Patel", role: "Drainage Specialist", initials: "KP" },
-  { id: "e5", name: "Ankit Verma", role: "Drone & GIS Lead", initials: "AV" },
+  { id: "e1", name: "Narender Kumar", role: "MD & CEO — All-Topics SME", initials: "NK" },
+  { id: "e2", name: "Munesh Kumari", role: "Director", initials: "MK" },
+  { id: "e3", name: "Sahil", role: "Software Engineer", initials: "SA" },
+  { id: "e4", name: "Rajesh Kumar", role: "X-Section Lead", initials: "RK" },
+  { id: "e5", name: "Sonu", role: "AutoCAD Lead", initials: "SO" },
+  { id: "e6", name: "Ankit", role: "Survey Lead", initials: "AN" },
+  { id: "e7", name: "Komal", role: "Accounts", initials: "KO" },
 ];
 
 const INITIAL_TASKS = [
-  { id: "NK-101", title: "Topographic survey — Wagholi layout", client: "Shivneri Infra Pvt Ltd", assignee: "e1", status: "done", priority: "high" },
-  { id: "NK-102", title: "L-section — Mula-Mutha canal stretch", client: "Pune Municipal Corporation", assignee: "e1", status: "inprogress", priority: "high" },
-  { id: "NK-103", title: "Boundary survey — Talegaon plot 44", client: "Deccan Builders", assignee: "e1", status: "todo", priority: "low" },
-  { id: "NK-104", title: "Bridge deck design — Indrayani crossing", client: "Konkan Bridgeworks", assignee: "e2", status: "inprogress", priority: "high" },
-  { id: "NK-105", title: "Pedestrian FOB — Hinjawadi Phase 2", client: "Sahyadri Roadways", assignee: "e2", status: "todo", priority: "medium" },
-  { id: "NK-106", title: "Abutment detailing — NH-60 minor bridge", client: "National Highways Cell", assignee: "e2", status: "done", priority: "medium" },
-  { id: "NK-107", title: "Alignment design — NH-60 realignment", client: "National Highways Cell", assignee: "e3", status: "inprogress", priority: "high" },
-  { id: "NK-108", title: "Pavement design — Chakan MIDC access road", client: "Chakan Industries Assoc.", assignee: "e3", status: "todo", priority: "medium" },
-  { id: "NK-109", title: "Geometric review — Katraj bypass widening", client: "Pune Municipal Corporation", assignee: "e3", status: "done", priority: "low" },
-  { id: "NK-110", title: "Storm water plan — Hinjawadi Phase 3", client: "Shivneri Infra Pvt Ltd", assignee: "e4", status: "inprogress", priority: "high" },
-  { id: "NK-111", title: "Wastewater network — Talegaon township", client: "Deccan Builders", assignee: "e4", status: "todo", priority: "high" },
-  { id: "NK-112", title: "Drainage audit — Baner low-lying pocket", client: "Pune Municipal Corporation", assignee: "e4", status: "done", priority: "medium" },
-  { id: "NK-113", title: "Drone survey — solar plant site, Solapur", client: "Sahyadri Roadways", assignee: "e5", status: "todo", priority: "high" },
-  { id: "NK-114", title: "Orthomosaic mapping — Chakan MIDC phase 2", client: "Chakan Industries Assoc.", assignee: "e5", status: "inprogress", priority: "medium" },
-  { id: "NK-115", title: "Volumetric survey — quarry site, Wai", client: "Konkan Bridgeworks", assignee: "e5", status: "done", priority: "low" },
+  { id: "NK-101", title: "Topographic survey — Narwana layout", client: "Jind Infra Developers Pvt Ltd", assignee: "e6", status: "done", priority: "high" },
+  { id: "NK-102", title: "Boundary survey — Safidon plot 44", client: "Rohtak Builders", assignee: "e6", status: "todo", priority: "low" },
+  { id: "NK-103", title: "Drone survey — solar plant site, Hisar", client: "Kaithal Roadways", assignee: "e6", status: "inprogress", priority: "high" },
+  { id: "NK-104", title: "L-section — Western Yamuna Canal stretch", client: "Jind Municipal Council", assignee: "e4", status: "inprogress", priority: "high" },
+  { id: "NK-105", title: "X-section survey — NH-352 Jind bypass", client: "National Highways Cell", assignee: "e4", status: "todo", priority: "medium" },
+  { id: "NK-106", title: "Cross-section review — Ghaggar embankment, Kaithal", client: "Jind Municipal Council", assignee: "e4", status: "done", priority: "medium" },
+  { id: "NK-107", title: "Bridge deck drafting — Uchana crossing", client: "Yamuna Bridgeworks", assignee: "e5", status: "inprogress", priority: "high" },
+  { id: "NK-108", title: "Abutment detailing — NH-71 minor bridge", client: "National Highways Cell", assignee: "e5", status: "done", priority: "medium" },
+  { id: "NK-109", title: "Pavement drafting — Rohtak industrial access road", client: "Panipat Industries Assoc.", assignee: "e5", status: "todo", priority: "medium" },
+  { id: "NK-110", title: "GIS survey-data pipeline upgrade", client: "Internal — NK Consultancy", assignee: "e3", status: "inprogress", priority: "high" },
+  { id: "NK-111", title: "Drawing archive digitization — legacy project scans", client: "Internal — NK Consultancy", assignee: "e3", status: "todo", priority: "low" },
+  { id: "NK-112", title: "Design review & sign-off — NH-71 realignment", client: "National Highways Cell", assignee: "e1", status: "done", priority: "high" },
+  { id: "NK-113", title: "Client escalation review — Panipat Industries Assoc.", client: "Panipat Industries Assoc.", assignee: "e1", status: "inprogress", priority: "high" },
+  { id: "NK-114", title: "Tender documentation — Jind Municipal Council waterworks", client: "Jind Municipal Council", assignee: "e2", status: "todo", priority: "high" },
+  { id: "NK-115", title: "Vendor coordination — Kaithal drainage project", client: "Kaithal Roadways", assignee: "e2", status: "inprogress", priority: "medium" },
 ];
 
 const INITIAL_CLIENTS = [
-  { id: "c1", name: "Shivneri Infra Pvt Ltd", contact: "Mahesh Rane", phone: "+91 98230 11234", due: 184000, invoiceDate: "2026-05-12", lastCall: "2026-07-18", status: "overdue", notes: "Promised payment after milestone billing on the 25th." },
-  { id: "c2", name: "Pune Municipal Corporation", contact: "Eng. S. Bhosale", phone: "+91 20 2612 3456", due: 96000, invoiceDate: "2026-06-20", lastCall: "2026-07-20", status: "due-soon", notes: "Bill in final approval stage at ward office." },
-  { id: "c3", name: "Deccan Builders", contact: "Anil Ghorpade", phone: "+91 98220 55678", due: 52000, invoiceDate: "2026-06-02", lastCall: "2026-07-10", status: "overdue", notes: "Escalate to email if no response by Friday." },
-  { id: "c4", name: "Konkan Bridgeworks", contact: "Neha Sawant", phone: "+91 90210 44890", due: 0, invoiceDate: "2026-05-28", lastCall: "2026-07-05", status: "paid", notes: "Cleared in full. Official receipt dispatched." },
-  { id: "c5", name: "Sahyadri Roadways", contact: "Ramesh Kadam", phone: "+91 98811 22990", due: 133000, invoiceDate: "2026-06-15", lastCall: "2026-07-21", status: "due-soon", notes: "Confirmed cheque dispatch, awaiting bank clearance." },
-  { id: "c6", name: "Chakan Industries Assoc.", contact: "Devendra More", phone: "+91 97640 33221", due: 76500, invoiceDate: "2026-04-30", lastCall: "2026-07-19", status: "overdue", notes: "Third reminder call made; requested formal statement." },
+  { id: "c1", name: "Jind Infra Developers Pvt Ltd", contact: "Suresh Malik", phone: "+91 98961 23450", due: 184000, invoiceDate: "2026-05-12", lastCall: "2026-07-18", status: "overdue", notes: "Promised payment after milestone billing on the 25th." },
+  { id: "c2", name: "Jind Municipal Council", contact: "Eng. R. Dahiya", phone: "+91 98123 45678", due: 96000, invoiceDate: "2026-06-20", lastCall: "2026-07-20", status: "due-soon", notes: "Bill in final approval stage at municipal office." },
+  { id: "c3", name: "Rohtak Builders", contact: "Vinod Chhikara", phone: "+91 98221 55678", due: 52000, invoiceDate: "2026-06-02", lastCall: "2026-07-10", status: "overdue", notes: "Escalate to email if no response by Friday." },
+  { id: "c4", name: "Yamuna Bridgeworks", contact: "Neha Sharma", phone: "+91 90211 44890", due: 0, invoiceDate: "2026-05-28", lastCall: "2026-07-05", status: "paid", notes: "Cleared in full. Official receipt dispatched." },
+  { id: "c5", name: "Kaithal Roadways", contact: "Ramesh Sihag", phone: "+91 98811 22990", due: 133000, invoiceDate: "2026-06-15", lastCall: "2026-07-21", status: "due-soon", notes: "Confirmed cheque dispatch, awaiting bank clearance." },
+  { id: "c6", name: "Panipat Industries Assoc.", contact: "Devendra Ahlawat", phone: "+91 97641 33221", due: 76500, invoiceDate: "2026-04-30", lastCall: "2026-07-19", status: "overdue", notes: "Third reminder call made; requested formal statement." },
 ];
 
 const STATUS_META = {
@@ -118,10 +120,7 @@ function TopNav({ page, setPage }) {
           <div style={{ background: C.orange }} className="w-9 h-9 flex items-center justify-center rounded f-mono text-white text-sm font-bold shadow-sm">
             NK
           </div>
-          <div>
-            <div style={{ color: C.paper }} className="f-display text-base font-bold tracking-tight leading-none">NK Consultancy</div>
-            <div style={{ color: C.blueLight }} className="f-mono text-[10px] tracking-widest mt-1">CIVIL &amp; SURVEY PVT LTD</div>
-          </div>
+          <div style={{ color: C.paper }} className="f-display text-base font-bold tracking-tight leading-none">NK Consultancy</div>
         </button>
 
         {/* Desktop Menu */}
@@ -191,10 +190,6 @@ function Landing({ setPage }) {
       <section style={{ background: C.navy }} className="contour-bg relative overflow-hidden border-b border-slate-800">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-12 pb-16 md:pt-20 md:pb-24">
           <div className="max-w-3xl">
-            <div style={{ borderColor: C.blueLight, color: C.orange, background: "rgba(15, 33, 55, 0.6)" }} className="f-mono text-xs inline-flex items-center gap-2 border px-3 py-1.5 rounded-full mb-6">
-              <span className="w-2 h-2 rounded-full bg-orange-500 animate-pulse" />
-              SURVEY MARK // PUNE DIVISION
-            </div>
             <h1 style={{ color: C.paper }} className="f-display text-3xl sm:text-5xl lg:text-6xl font-bold leading-tight">
               Precision ground truth for engineering designs.
             </h1>
@@ -254,7 +249,7 @@ function Landing({ setPage }) {
             <div style={{ color: C.blueLight }} className="f-mono text-xs font-semibold tracking-wider uppercase mb-1">Engineering Team</div>
             <h2 style={{ color: C.paper }} className="f-display text-2xl sm:text-3xl font-bold">Multidisciplinary Practice Leaders</h2>
           </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             {EMPLOYEES.map((e) => (
               <div key={e.id} style={{ background: "rgba(255,255,255,0.04)", borderColor: C.lineDark }} className="border rounded-md p-5 flex sm:flex-col items-center sm:items-start gap-4 sm:gap-0">
                 <div style={{ background: C.orange, color: "#FFFFFF" }} className="w-11 h-11 rounded-full flex items-center justify-center f-mono text-sm font-bold shrink-0 sm:mb-4">
@@ -278,9 +273,9 @@ function Landing({ setPage }) {
             <p style={{ color: C.steel }} className="f-body text-sm leading-relaxed">Civil design, topographic surveying, and geospatial infrastructure consulting.</p>
           </div>
           <div style={{ color: C.paper }} className="f-body text-sm space-y-2.5">
-            <div className="flex items-center gap-2.5"><MapPin size={16} style={{ color: C.orange }} /> Pune, Maharashtra, India</div>
-            <div className="flex items-center gap-2.5"><Phone size={16} style={{ color: C.orange }} /> +91 20 4567 8901</div>
-            <div className="flex items-center gap-2.5"><Mail size={16} style={{ color: C.orange }} /> contact@nkconsultancy.example</div>
+            <div className="flex items-center gap-2.5"><MapPin size={16} style={{ color: C.orange }} /> Jind, Haryana, India</div>
+            <div className="flex items-center gap-2.5"><Phone size={16} style={{ color: C.orange }} /> +91-9355247066</div>
+            <div className="flex items-center gap-2.5"><Mail size={16} style={{ color: C.orange }} /> nkconsultacypvtltd@gmail.com</div>
           </div>
           <div style={{ color: C.steel }} className="f-mono text-xs md:text-right flex md:block items-center justify-between">
             <div>DRAWING REF: NK/2026/REV-C</div>
