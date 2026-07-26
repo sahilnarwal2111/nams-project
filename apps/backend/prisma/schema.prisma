@@ -1,0 +1,47 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// IDs reuse the frontend's existing human-readable values ("e1", "NK-101", "c1")
+// instead of generated ids — see CLAUDE.md for why.
+
+model Employee {
+  id       String @id
+  name     String
+  role     String
+  initials String
+  tasks    Task[]
+}
+
+model Task {
+  id         String   @id
+  title      String
+  client     String
+  // Free-text values matching the frontend's STATUS_META / PRIORITY_META keys
+  // exactly ("todo" | "inprogress" | "done", "low" | "medium" | "high").
+  // Kept as String rather than an enum so the API can echo the same literal
+  // values the UI already expects, with no hyphen/case remapping layer.
+  status     String
+  priority   String
+  assigneeId String
+  assignee   Employee @relation(fields: [assigneeId], references: [id])
+  updatedAt  DateTime @updatedAt
+}
+
+model Client {
+  id          String   @id
+  name        String
+  contact     String
+  phone       String
+  due         Int
+  invoiceDate DateTime
+  lastCall    DateTime
+  // Matches PAY_STATUS_META keys: "paid" | "due-soon" | "overdue"
+  status      String
+  notes       String?
+}
