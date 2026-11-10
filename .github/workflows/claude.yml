@@ -1,0 +1,67 @@
+name: Claude maintainer
+
+# Starts the Claude agent when someone writes "@claude" in an issue, an issue
+# comment, a PR comment or a PR review. The agent reads CLAUDE.md, works on a
+# branch and opens a pull request; it never pushes to main.
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  pull_request_review:
+    types: [submitted]
+  issues:
+    types: [opened, assigned]
+
+jobs:
+  claude:
+    if: |
+      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
+      (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: read
+
+    # A database so the agent can run `npm run check` (backend tests) itself.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: nk
+          POSTGRES_PASSWORD: nk
+          POSTGRES_DB: nk_consultancy
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://nk:nk@localhost:5432/nk_consultancy
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_args: |
+            --allowedTools "Bash(npm:*),Bash(npx:*),Bash(node:*),Bash(git:*),Bash(curl:*),Bash(cat:*),Bash(ls:*),Bash(grep:*),Bash(find:*),Bash(sed:*),Read,Edit,Write,Glob,Grep"
+            --max-turns 60
