@@ -1,9 +1,9 @@
-import React, { useState, useMemo } from "react";
+import { useState, useMemo } from "react";
 import {
-  Ruler, Map, Route, Building2, Droplets, Plane, Waves, LayoutGrid,
-  Wallet, Menu, X, ChevronRight, CheckCircle2, Circle, Clock, PhoneCall,
-  AlertTriangle, Plus, Mail, Phone, MapPin, ArrowUpRight, ArrowLeft,
-  ArrowRight, CalendarClock, User, Filter, ChevronDown
+  Ruler, Route, Building2, Droplets, Plane, Waves,
+  Menu, X, ChevronRight, Clock, PhoneCall,
+  Mail, Phone, MapPin, ArrowLeft,
+  ArrowRight, Filter, ChevronDown
 } from "lucide-react";
 
 /* ---------------------------------------------------------------

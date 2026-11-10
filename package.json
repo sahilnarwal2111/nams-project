@@ -8,6 +8,11 @@
     "build:frontend": "npm run build --workspace=apps/frontend",
     "lint:frontend": "npm run lint --workspace=apps/frontend",
     "dev:backend": "npm run dev --workspace=apps/backend",
+    "lint:backend": "npm run lint --workspace=apps/backend",
+    "test:backend": "npm run test --workspace=apps/backend",
+    "lint": "npm run lint:frontend && npm run lint:backend",
+    "test": "npm run test:backend",
+    "check": "npm run lint && npm run build:frontend && npm run test",
     "prisma:migrate": "npm run prisma:migrate --workspace=apps/backend",
     "prisma:generate": "npm run prisma:generate --workspace=apps/backend",
     "prisma:seed": "npm run prisma:seed --workspace=apps/backend"

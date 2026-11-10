@@ -1,0 +1,27 @@
+name: Task / feature
+description: New work for the maintainer agent (a feature, backend endpoint, or change)
+labels: ["task"]
+body:
+  - type: textarea
+    id: goal
+    attributes:
+      label: What should be done?
+      description: Describe the outcome, not the implementation, unless the implementation matters.
+    validations:
+      required: true
+  - type: textarea
+    id: done
+    attributes:
+      label: How do we know it's done?
+      description: A short checklist the agent can verify before opening the PR.
+      placeholder: |
+        - [ ] Work Board loads its tasks from GET /api/tasks
+        - [ ] Moving a task survives a page reload
+        - [ ] Tests cover the new endpoint
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else?
+      description: Constraints, links, screenshots, related issues.

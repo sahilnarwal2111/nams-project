@@ -1,0 +1,116 @@
+// API tests. They run against a real Postgres database (DATABASE_URL) that has
+// been migrated and seeded — `npm test` does that before invoking node --test.
+// Every test that writes data restores what it changed, so the suite can be
+// re-run without re-seeding.
+import "dotenv/config";
+import { test, before, after } from "node:test";
+import assert from "node:assert/strict";
+import { app } from "../src/app.js";
+import { prisma } from "../src/lib/prisma.js";
+
+let server;
+let base;
+
+before(async () => {
+  server = app.listen(0);
+  await new Promise((resolve) => server.once("listening", resolve));
+  base = `http://127.0.0.1:${server.address().port}`;
+});
+
+after(async () => {
+  await new Promise((resolve) => server.close(resolve));
+  await prisma.$disconnect();
+});
+
+const get = (path) => fetch(base + path);
+const patch = (path, body) =>
+  fetch(base + path, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+test("GET /api/health reports ok", async () => {
+  const res = await get("/api/health");
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { status: "ok" });
+});
+
+test("GET /api/employees returns the seeded team", async () => {
+  const res = await get("/api/employees");
+  assert.equal(res.status, 200);
+  const employees = await res.json();
+  assert.ok(employees.length >= 7, "expected at least the 7 seeded employees");
+  assert.ok(employees.some((e) => e.id === "e1"));
+  for (const e of employees) {
+    assert.ok(e.id && e.name && e.role && e.initials, `incomplete employee ${JSON.stringify(e)}`);
+  }
+});
+
+test("GET /api/tasks returns tasks with values the UI understands", async () => {
+  const res = await get("/api/tasks");
+  assert.equal(res.status, 200);
+  const tasks = await res.json();
+  assert.ok(tasks.length > 0);
+  for (const t of tasks) {
+    assert.ok(["todo", "inprogress", "done"].includes(t.status), `bad status on ${t.id}: ${t.status}`);
+    assert.ok(["low", "medium", "high"].includes(t.priority), `bad priority on ${t.id}: ${t.priority}`);
+    assert.ok(t.assigneeId, `task ${t.id} has no assignee`);
+  }
+});
+
+test("PATCH /api/tasks/:id changes the status", async () => {
+  const tasks = await (await get("/api/tasks")).json();
+  const original = tasks.find((t) => t.id === "NK-102");
+  assert.ok(original, "seed task NK-102 missing");
+  const next = original.status === "done" ? "todo" : "done";
+
+  const res = await patch("/api/tasks/NK-102", { status: next });
+  assert.equal(res.status, 200);
+  assert.equal((await res.json()).status, next);
+
+  const restored = await patch("/api/tasks/NK-102", { status: original.status });
+  assert.equal(restored.status, 200);
+});
+
+test("PATCH /api/tasks/:id rejects an unknown status", async () => {
+  const res = await patch("/api/tasks/NK-102", { status: "blocked" });
+  assert.equal(res.status, 400);
+  assert.match((await res.json()).error, /status must be one of/);
+});
+
+test("PATCH /api/tasks/:id returns 404 for an unknown task", async () => {
+  const res = await patch("/api/tasks/NK-999", { status: "done" });
+  assert.equal(res.status, 404);
+});
+
+test("GET /api/clients returns receivables with valid statuses", async () => {
+  const res = await get("/api/clients");
+  assert.equal(res.status, 200);
+  const clients = await res.json();
+  assert.ok(clients.length >= 6, "expected at least the 6 seeded clients");
+  for (const c of clients) {
+    assert.ok(["paid", "due-soon", "overdue"].includes(c.status), `bad status on ${c.id}: ${c.status}`);
+    assert.equal(typeof c.due, "number");
+    assert.ok(!Number.isNaN(Date.parse(c.invoiceDate)), `bad invoiceDate on ${c.id}`);
+    assert.ok(!Number.isNaN(Date.parse(c.lastCall)), `bad lastCall on ${c.id}`);
+  }
+});
+
+test("PATCH /api/clients/:id logs a call by moving lastCall to now", async () => {
+  const before = (await (await get("/api/clients")).json()).find((c) => c.id === "c1");
+  assert.ok(before, "seed client c1 missing");
+
+  const res = await patch("/api/clients/c1", {});
+  assert.equal(res.status, 200);
+  const after = await res.json();
+  assert.ok(Date.parse(after.lastCall) > Date.parse(before.lastCall), "lastCall did not advance");
+  assert.ok(Date.now() - Date.parse(after.lastCall) < 60_000, "lastCall is not close to now");
+
+  await prisma.client.update({ where: { id: "c1" }, data: { lastCall: new Date(before.lastCall) } });
+});
+
+test("PATCH /api/clients/:id returns 404 for an unknown client", async () => {
+  const res = await patch("/api/clients/c999", {});
+  assert.equal(res.status, 404);
+});
