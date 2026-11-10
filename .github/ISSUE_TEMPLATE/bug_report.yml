@@ -1,0 +1,45 @@
+name: Bug report
+description: Something on the site or API is broken
+labels: ["bug"]
+body:
+  - type: dropdown
+    id: area
+    attributes:
+      label: Where
+      options:
+        - Home page
+        - Work Board
+        - Payments
+        - Backend API
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: What did you do?
+      description: Step by step, so it can be repeated.
+      placeholder: |
+        1. Open the Work Board
+        2. Click "Move right" on NK-104
+        3. Reload the page
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened instead?
+      description: Paste any error message you saw. A screenshot helps.
+    validations:
+      required: true
+  - type: input
+    id: device
+    attributes:
+      label: Device / browser
+      placeholder: e.g. iPhone Safari, Windows Chrome

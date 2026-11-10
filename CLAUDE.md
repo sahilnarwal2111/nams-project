@@ -1,38 +1,96 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for Claude Code when working in this repository. The `maintainer` agent in `.claude/agents/maintainer.md` builds on this file.
 
-## Commands
+## What this is
+
+Website and internal tools for a civil-engineering consultancy ("NK Consultancy", Jind, Haryana). An npm-workspaces monorepo:
+
+- `apps/frontend` — Vite + React 19 single-page site (marketing landing page, a Work Board kanban, and a Payments receivables tracker). Deployed on Vercel from `main`.
+- `apps/backend` — Express 5 + Prisma API over Postgres 16. Not deployed anywhere yet.
+
+**Current state:** the frontend still runs entirely on hard-coded mock data in `App.jsx` and does not call the API. Wiring the two together is the main open piece of work.
+
+## Commands (run from the repo root)
 
 ```bash
-npm run dev       # start Vite dev server (HMR)
-npm run build     # production build to dist/
-npm run preview   # serve the production build locally
-npm run lint       # ESLint over the whole repo
+npm install                 # once; installs both workspaces
+
+npm run dev:frontend        # Vite dev server on http://localhost:5173
+npm run dev:backend         # API on http://localhost:4000 (needs Postgres, see below)
+
+npm run lint                # ESLint on both apps
+npm run build:frontend      # production build to apps/frontend/dist
+npm run test:backend        # migrate + seed + API tests (needs Postgres)
+npm run check               # lint + build + tests — must pass before any PR
+
+npm run prisma:migrate      # create a migration after editing schema.prisma
+npm run prisma:generate     # regenerate the Prisma client
+npm run prisma:seed         # (re)load the seed data; upserts, safe to re-run
 ```
 
-There is no test suite configured in this project.
+### Local setup
 
-### Running inside Docker
+Node 24 on the host; no Docker required. The backend needs a Postgres 16 database reachable at the `DATABASE_URL` in `apps/backend/.env` (copy from `.env.example`; default is `postgresql://nk:nk@localhost:5432/nk_consultancy`). Either run `docker compose up -d` if Docker is available, or a local Postgres with a `nk`/`nk` user and `nk_consultancy` database.
 
-This project is developed inside a Docker container (`node:latest`) with the repo bind-mounted at `/app`; Node/npm are not installed on the host. `vite.config.js` sets `server.host: true` — without it, Vite binds to the container's loopback interface only and the host machine cannot reach it through the container's port mapping, even though the port looks correctly forwarded.
+`vite.config.js` sets `server.host: true` and polling file-watching so the dev server also works when the repo is bind-mounted into a container; leave those in place.
 
-## Architecture
+## CI
 
-This is a single-page marketing + internal-tools demo site for a civil engineering consultancy ("NK Consultancy"), built with Vite + React 19, no TypeScript, no backend, and no router.
+`.github/workflows/ci.yml` runs on every PR and on pushes to `main`: frontend lint + build, and backend lint + tests against a Postgres service container. A PR is not mergeable until it is green.
 
-**Everything lives in `src/App.jsx`** (~590 lines) as one file: design tokens, mock data, and all page components. It is organized top-to-bottom as:
-1. `C` — a design-token object of hex colors (navy, orange, paper, etc.) used via inline `style={{ }}` props for brand colors, layered with Tailwind utility classes (`className`) for layout, spacing, and responsive breakpoints. This split is intentional and consistent throughout the file — brand colors go through `C`, everything else through Tailwind.
-2. Mock data arrays (`SERVICES`, `EMPLOYEES`, `INITIAL_TASKS`, `INITIAL_CLIENTS`) and `*_META` lookup objects (`STATUS_META`, `PRIORITY_META`, `PAY_STATUS_META`) mapping status/priority enum values to their label/color/bg. There is no backend or API — all "persisted" state (task status, client call logs) lives in React `useState` and resets on page reload.
-3. Page components, each a self-contained section of the file: `TopNav`, `Landing` (hero + services + team + footer), `WorkBoard` (kanban-style task board with drag-free move-left/move-right buttons), `Payments` (receivables tracker with call-logging).
-4. `App` — the root component. Page switching (`home` / `work` / `payments`) is done via a `useState` string in `App`, **not** URL routing — there is no react-router, so browser back/forward and deep links to a specific page don't work.
+## Frontend architecture
 
-**Styling pipeline**: Tailwind v4 via the `@tailwindcss/vite` plugin (configured in `vite.config.js`), entry point `src/index.css`. That file also defines the custom non-Tailwind classes used across `App.jsx` (`f-display`/`f-body`/`f-mono` font classes, `contour-bg`, `grid-bg`, `card-hover`, `no-scrollbar`) and imports the Google Fonts stylesheet. **The Google Fonts `@import` must stay above `@import "tailwindcss"`** — Tailwind's import expands into a large block of generated rules at that position, and CSS requires all `@import`s to precede any other rule, so reversing the order breaks the build.
+Everything lives in `apps/frontend/src/App.jsx` (~590 lines), top to bottom:
 
-Icons come from `lucide-react`.
+1. `C` — design-token object of hex colors used via inline `style={{ }}` for brand colors, layered with Tailwind utility classes for layout and spacing. Brand colors go through `C`, everything else through Tailwind. Keep that split.
+2. Mock data (`SERVICES`, `EMPLOYEES`, `INITIAL_TASKS`, `INITIAL_CLIENTS`) and `*_META` lookups (`STATUS_META`, `PRIORITY_META`, `PAY_STATUS_META`) mapping enum values to label/color. These literal enum values are the contract with the API — see below.
+3. Page components: `TopNav`, `Landing`, `WorkBoard` (move-left/move-right buttons, no drag), `Payments` (call logging).
+4. `App` — page switching via a `useState` string (`home` / `work` / `payments`). There is no router, so back/forward and deep links do not work.
+
+Styling: Tailwind v4 via `@tailwindcss/vite`, entry `src/index.css`, which also defines the custom classes (`f-display`, `f-body`, `f-mono`, `contour-bg`, `grid-bg`, `card-hover`, `no-scrollbar`) and imports Google Fonts. **The Google Fonts `@import` must stay above `@import "tailwindcss"`** — CSS requires all `@import`s before other rules and Tailwind's import expands into generated rules, so reversing them breaks the build.
+
+Icons: `lucide-react`. ESLint flags unused imports as errors, so remove icons you stop using.
+
+## Backend architecture
+
+```
+apps/backend/
+  src/server.js            loads .env, starts the app
+  src/app.js               Express app: CORS, JSON, routes, error handler
+  src/routes/*.routes.js   one router per resource
+  src/controllers/*.js     handlers; Prisma calls live here
+  src/lib/prisma.js        shared PrismaClient
+  prisma/schema.prisma     Employee, Task, Client
+  prisma/migrations/       committed migrations
+  prisma/seed.js           seed data mirroring the frontend mocks
+  test/api.test.js         node:test suite hitting the real app over HTTP
+```
+
+Endpoints today: `GET /api/health`, `GET /api/employees`, `GET /api/tasks`, `PATCH /api/tasks/:id` (body `{ status }`), `GET /api/clients`, `PATCH /api/clients/:id` (logs a call: sets `lastCall` to now).
+
+Design decisions to preserve:
+
+- **IDs are the frontend's human-readable values** (`e1`, `NK-101`, `c1`), not generated. Keeps the API's output identical to the mock data.
+- **Enum-like fields are plain strings** matching the frontend exactly: task `status` `todo|inprogress|done`, task `priority` `low|medium|high`, client `status` `paid|due-soon|overdue`. No Prisma enums, no case or hyphen remapping.
+- **Dates:** the API returns ISO timestamps; the UI uses `YYYY-MM-DD`. Convert in the frontend at the fetch boundary.
+- Unknown IDs return 404 (Prisma `P2025`); anything else falls through to the 500 handler in `app.js`.
+- CORS: `CORS_ORIGINS` is a comma-separated allowlist with `*` wildcards; unset allows everything (fine locally, not in production).
+
+Tests run against a real database: `npm test` in the backend runs `prisma migrate deploy`, seeds, then `node --test`. Tests that write must restore what they changed.
+
+## Rules for changes
+
+- Branch from `main`; never commit to `main` directly. PRs must pass CI.
+- Every bug fix gets a test that would have caught it; every new endpoint gets tests.
+- Schema changes always come with a migration. Never edit a migration that is already on `main`.
+- Keep `.env` untracked. Only `.env.example` is committed.
+- Don't add a router, TypeScript, or a state library as a side effect of another change; those are their own decisions.
 
 ## Deployment
 
-Deployed on Vercel. `vercel.json` explicitly sets `framework: vite` and `outputDirectory: dist` — Vercel's default framework detection expected a `build` output folder and failed without this.
+Frontend: Vercel, deploying `main`; every PR gets a preview URL. `vercel.json` sets `framework: vite` and `outputDirectory: dist` because Vercel's auto-detection expected `build/`.
 
-The GitHub remote has two branches, `main` and `master`; `main` is the default branch Vercel deploys from.
+Backend: nowhere yet. Hosting for the API and database is an open decision.
+
+The remote also has a stale `master` branch holding only the first commit; `main` is the default.
