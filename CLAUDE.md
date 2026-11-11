@@ -72,8 +72,11 @@ apps/backend/
   prisma/schema.prisma     Employee, Task, Client
   prisma/migrations/       committed migrations
   prisma/seed.js           seed data mirroring the frontend mocks
+  reporting/              aggregate SQL and read-only psql wrapper
   test/api.test.js         node:test suite hitting the real app over HTTP
 ```
+
+Operational metric definitions, denominators, and source limits live in `docs/metrics/`; read them before adding report metrics.
 
 Endpoints today (all under `/api`):
 
