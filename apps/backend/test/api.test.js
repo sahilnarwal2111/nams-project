@@ -585,6 +585,100 @@ test("DELETE /api/clients/:id returns 404 for an unknown client", async () => {
   assert.equal(await clientCount(), n);
 });
 
+/* ---- payments ---------------------------------------------------- */
+
+const pay = (id, body) => post(`/api/clients/${id}/payments`, body);
+const paymentsOf = async (id) => (await get(`/api/clients/${id}/payments`)).json();
+
+test("POST /api/clients/:id/payments records a part payment and lowers the dues", async () => {
+  await withCreatedClient({ ...validClient, due: 12000, status: "overdue" }, async (_res, created) => {
+    const t0 = Date.now();
+    const res = await pay(created.id, { amount: 5000, note: "  Cheque 4412 " });
+    assert.equal(res.status, 201);
+    const { payment, client } = await res.json();
+    assert.equal(payment.clientId, created.id);
+    assert.equal(payment.amount, 5000);
+    assert.equal(payment.note, "Cheque 4412");
+    assert.ok(Date.parse(payment.receivedAt) >= t0 - 1000);
+    assert.equal(client.due, 7000);
+    assert.equal(client.status, "overdue", "a part payment does not change the status");
+
+    const stored = (await (await get("/api/clients")).json()).find((c) => c.id === created.id);
+    assert.equal(stored.due, 7000);
+    assert.deepEqual(await paymentsOf(created.id), [payment]);
+  });
+});
+
+test("POST /api/clients/:id/payments marks the client paid when the dues are cleared", async () => {
+  await withCreatedClient({ ...validClient, due: 12000, status: "overdue" }, async (_res, created) => {
+    await pay(created.id, { amount: 2000, receivedAt: "2026-10-01" });
+    const res = await pay(created.id, { amount: 10000 });
+    assert.equal(res.status, 201);
+    const { client } = await res.json();
+    assert.equal(client.due, 0);
+    assert.equal(client.status, "paid");
+
+    const list = await paymentsOf(created.id);
+    assert.deepEqual(list.map((p) => p.amount), [10000, 2000], "newest first");
+    assert.equal(list[1].receivedAt, "2026-10-01T00:00:00.000Z");
+    assert.equal(list[1].note, null);
+    assert.equal(list.reduce((sum, p) => sum + p.amount, 0), 12000);
+  });
+});
+
+test("POST /api/clients/:id/payments rejects bad amounts and overpayment without changing anything", async () => {
+  await withCreatedClient({ ...validClient, due: 12000 }, async (_res, created) => {
+    for (const body of [
+      { amount: 0 },
+      { amount: -100 },
+      { amount: 10.5 },
+      { amount: "5000" },
+      {},
+      { amount: 12001 },
+      { amount: 100, note: 5 },
+      { amount: 100, receivedAt: "yesterday" },
+    ]) {
+      const res = await pay(created.id, body);
+      assert.equal(res.status, 400, JSON.stringify(body));
+      assert.equal(typeof (await res.json()).error, "string");
+    }
+    assert.match((await (await pay(created.id, { amount: 12001 })).json()).error, /more than the outstanding 12000/);
+    const stored = (await (await get("/api/clients")).json()).find((c) => c.id === created.id);
+    assert.equal(stored.due, 12000);
+    assert.deepEqual(await paymentsOf(created.id), []);
+  });
+});
+
+test("two payments arriving together cannot take the dues below zero", async () => {
+  await withCreatedClient({ ...validClient, due: 10000 }, async (_res, created) => {
+    const results = await Promise.all([pay(created.id, { amount: 7000 }), pay(created.id, { amount: 7000 })]);
+    assert.deepEqual(results.map((r) => r.status).sort(), [201, 400]);
+    const stored = (await (await get("/api/clients")).json()).find((c) => c.id === created.id);
+    assert.equal(stored.due, 3000);
+    assert.equal((await paymentsOf(created.id)).length, 1);
+  });
+});
+
+test("payments endpoints return 404 for an unknown client", async () => {
+  assert.equal((await get("/api/clients/c9999/payments")).status, 404);
+  const res = await pay("c9999", { amount: 100 });
+  assert.equal(res.status, 404);
+  assert.match((await res.json()).error, /c9999/);
+});
+
+test("deleting a client removes its payments", async () => {
+  const before = await prisma.payment.count();
+  let id;
+  await withCreatedClient({ ...validClient, due: 500 }, async (_res, created) => {
+    id = created.id;
+    await pay(id, { amount: 200 });
+    assert.equal(await prisma.payment.count({ where: { clientId: id } }), 1);
+    assert.equal((await fetch(`${base}/api/clients/${id}`, { method: "DELETE" })).status, 204);
+    assert.equal(await prisma.payment.count({ where: { clientId: id } }), 0);
+  });
+  assert.equal(await prisma.payment.count(), before);
+});
+
 /* ---- staff login ------------------------------------------------- */
 
 import { clearFailedLogins, issueToken, MAX_FAILED_LOGINS, TOKEN_TTL_MS } from "../src/lib/auth.js";
@@ -624,6 +718,8 @@ test("with APP_PASSWORD set, data endpoints need a token but health and session 
     assert.equal((await post("/api/tasks", validTask)).status, 401);
     assert.equal((await patch("/api/tasks/NK-102", { status: "done" })).status, 401);
     assert.equal((await fetch(`${base}/api/clients/c1`, { method: "DELETE" })).status, 401);
+    assert.equal((await get("/api/clients/c1/payments")).status, 401);
+    assert.equal((await post("/api/clients/c1/payments", { amount: 1 })).status, 401);
     assert.equal((await get("/api/health")).status, 200);
     assert.deepEqual(await (await get("/api/auth/session")).json(), { required: true, authenticated: false });
   });
