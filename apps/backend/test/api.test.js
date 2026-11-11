@@ -23,6 +23,12 @@ after(async () => {
 });
 
 const get = (path) => fetch(base + path);
+const post = (path, body) =>
+  fetch(base + path, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
 const patch = (path, body) =>
   fetch(base + path, {
     method: "PATCH",
@@ -98,6 +104,71 @@ test("PATCH /api/tasks/:id rejects an unknown status", async () => {
 test("PATCH /api/tasks/:id returns 404 for an unknown task", async () => {
   const res = await patch("/api/tasks/NK-999", { status: "done" });
   assert.equal(res.status, 404);
+});
+
+const validTask = { title: "Test task", client: "Test client", assigneeId: "e1", priority: "high" };
+const taskCount = async () => (await (await get("/api/tasks")).json()).length;
+
+test("POST /api/tasks creates a task with the next NK id and default status", async () => {
+  const before = await (await get("/api/tasks")).json();
+  const max = Math.max(...before.map((t) => Number(t.id.replace("NK-", ""))));
+  let createdId;
+  try {
+    const res = await post("/api/tasks", validTask);
+    assert.equal(res.status, 201);
+    const task = await res.json();
+    createdId = task.id;
+    assert.equal(task.id, `NK-${String(max + 1).padStart(3, "0")}`);
+    assert.equal(task.status, "todo");
+    assert.equal(task.title, validTask.title);
+    assert.equal(task.client, validTask.client);
+    assert.equal(task.assigneeId, "e1");
+    assert.equal(task.priority, "high");
+    assert.equal((await get(`/api/tasks/${task.id}`)).status, 200);
+  } finally {
+    if (createdId) await prisma.task.deleteMany({ where: { id: createdId } });
+  }
+});
+
+test("POST /api/tasks accepts an explicit status", async () => {
+  let createdId;
+  try {
+    const res = await post("/api/tasks", { ...validTask, status: "inprogress" });
+    assert.equal(res.status, 201);
+    const task = await res.json();
+    createdId = task.id;
+    assert.equal(task.status, "inprogress");
+  } finally {
+    if (createdId) await prisma.task.deleteMany({ where: { id: createdId } });
+  }
+});
+
+test("POST /api/tasks rejects missing or empty fields", async () => {
+  const n = await taskCount();
+  for (const field of Object.keys(validTask)) {
+    const missing = { ...validTask };
+    delete missing[field];
+    for (const body of [missing, { ...validTask, [field]: "" }, { ...validTask, [field]: "   " }]) {
+      const res = await post("/api/tasks", body);
+      assert.equal(res.status, 400, `${field}: ${JSON.stringify(body)}`);
+      assert.match((await res.json()).error, new RegExp(field));
+    }
+  }
+  assert.equal(await taskCount(), n, "a rejected request created a task");
+});
+
+test("POST /api/tasks rejects bad priority, status and assignee", async () => {
+  const n = await taskCount();
+  for (const [body, re] of [
+    [{ ...validTask, priority: "urgent" }, /priority must be one of/],
+    [{ ...validTask, status: "blocked" }, /status must be one of/],
+    [{ ...validTask, assigneeId: "e999" }, /assigneeId/],
+  ]) {
+    const res = await post("/api/tasks", body);
+    assert.equal(res.status, 400);
+    assert.match((await res.json()).error, re);
+  }
+  assert.equal(await taskCount(), n, "a rejected request created a task");
 });
 
 test("GET /api/clients returns receivables with valid statuses", async () => {
