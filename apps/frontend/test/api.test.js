@@ -14,6 +14,8 @@ import {
   clientToApi,
   paymentError,
   paymentPatchBody,
+  paymentToApi,
+  paymentFromApi,
   nextLocalClientId,
   authHeaders,
   sessionState,
@@ -281,4 +283,18 @@ test("sessionState decides between open, sign-in and signed-in", () => {
   assert.equal(sessionState({ required: false, authenticated: false }), "open");
   assert.equal(sessionState({ required: true, authenticated: false }), "login");
   assert.equal(sessionState({ required: true, authenticated: true }), "signedIn");
+});
+
+test("paymentToApi parses the amount and sends a blank note as null", () => {
+  assert.deepEqual(paymentToApi("25,000", "  Cheque 4412 "), { amount: 25000, note: "Cheque 4412" });
+  assert.deepEqual(paymentToApi("500", "   "), { amount: 500, note: null });
+  assert.deepEqual(paymentToApi("500", undefined), { amount: 500, note: null });
+});
+
+test("paymentFromApi puts the payment on the viewer's local day", () => {
+  const justAfterMidnight = new Date(2026, 10, 11, 0, 30);
+  const p = paymentFromApi({ id: 7, clientId: "c1", amount: 5000, note: null, receivedAt: justAfterMidnight.toISOString() });
+  assert.equal(p.receivedAt, "2026-11-11");
+  assert.equal(p.amount, 5000);
+  assert.equal(p.id, 7);
 });

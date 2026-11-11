@@ -2,7 +2,7 @@ import { useState, useMemo, useEffect } from "react";
 import {
   hasApi, fetchEmployees, fetchTasks, updateTaskStatus, fetchClients, logClientCall, localDay,
   createTask, updateTask, deleteTask, taskFromForm, nextLocalTaskId,
-  createClient, updateClient, deleteClient, recordPayment,
+  createClient, updateClient, deleteClient, recordPayment, fetchPayments,
   clientToApi, clientFormError, paymentError, paymentPatchBody, parseRupees, nextLocalClientId,
   fetchSession, login, logout, onAuthLost,
 } from "./api.js";
@@ -10,7 +10,7 @@ import {
   Ruler, Route, Building2, Droplets, Plane, Waves,
   Menu, X, ChevronRight, Clock, PhoneCall,
   Mail, Phone, MapPin, ArrowLeft,
-  ArrowRight, Filter, ChevronDown, Plus, Pencil, Trash2, CalendarDays, IndianRupee, Lock, LogOut
+  ArrowRight, Filter, ChevronDown, Plus, Pencil, Trash2, CalendarDays, IndianRupee, Lock, LogOut, History
 } from "lucide-react";
 
 /* ---------------------------------------------------------------
@@ -846,7 +846,7 @@ function WorkBoard() {
 /* ---------------------------------------------------------------
    PAYMENTS / RECEIVABLES PAGE
 ------------------------------------------------------------------*/
-function ClientCard({ client, onCallLogged, onEdit, onPayment, busy }) {
+function ClientCard({ client, onCallLogged, onEdit, onPayment, onHistory, busy }) {
   const meta = PAY_STATUS_META[client.status];
   return (
     <div style={{ background: C.card, borderColor: C.line }} className="border rounded-md p-5 shadow-sm flex flex-col justify-between">
@@ -860,6 +860,15 @@ function ClientCard({ client, onCallLogged, onEdit, onPayment, busy }) {
             <span style={{ background: meta.bg, color: meta.color }} className="f-mono text-[10px] font-bold px-2.5 py-1 rounded uppercase tracking-wide">
               {meta.label}
             </span>
+            <button
+              onClick={() => onHistory(client)}
+              aria-label={`Payment history for ${client.name}`}
+              title="Payment history"
+              style={{ color: C.steel }}
+              className="p-1 rounded hover:bg-stone-100 active:scale-95 transition-transform"
+            >
+              <History size={13} />
+            </button>
             <button
               onClick={() => onEdit(client)}
               aria-label={`Edit ${client.name}`}
@@ -998,6 +1007,7 @@ function ClientForm({ client, onSave, onDelete, onClose }) {
 // Record an amount received from a client. onSave returns a promise.
 function PaymentForm({ client, onSave, onClose }) {
   const [amount, setAmount] = useState("");
+  const [note, setNote] = useState("");
   const { busy, error, setError, run } = useDialogAction(onClose);
   const paid = parseRupees(amount);
   const remaining = Number.isNaN(paid) || paid > client.due ? null : client.due - paid;
@@ -1006,7 +1016,7 @@ function PaymentForm({ client, onSave, onClose }) {
     e.preventDefault();
     const problem = paymentError(client, amount);
     if (problem) { setError(problem); return; }
-    run(() => onSave(client, amount));
+    run(() => onSave(client, amount, note));
   };
 
   return (
@@ -1036,7 +1046,72 @@ function PaymentForm({ client, onSave, onClose }) {
             {remaining === 0 ? "This clears the account. It will be marked as paid." : `${fmtINR(remaining)} will remain outstanding.`}
           </p>
         )}
+        <Field label="Note">
+          <input name="note" value={note} onChange={(e) => setNote(e.target.value)} style={{ borderColor: C.line, color: C.ink }} className={INPUT_CLASS} placeholder="e.g. Cheque no., UPI, cash" />
+        </Field>
         <DialogError error={error} />
+      </div>
+    </Modal>
+  );
+}
+
+// The payments received from one client, newest first. load returns a promise
+// of the list.
+function PaymentHistory({ client, load, onClose }) {
+  const [state, setState] = useState({ status: "loading" });
+
+  useEffect(() => {
+    let cancelled = false;
+    load()
+      .then((payments) => { if (!cancelled) setState({ status: "ready", payments }); })
+      .catch((err) => { if (!cancelled) setState({ status: "error", message: err.message }); });
+    return () => { cancelled = true; };
+  }, [load]);
+
+  const total = state.status === "ready" ? state.payments.reduce((sum, p) => sum + p.amount, 0) : 0;
+
+  return (
+    <Modal
+      label={`Payment history for ${client.name}`}
+      kicker="Payment History"
+      title={client.name}
+      onClose={onClose}
+      onSubmit={(e) => { e.preventDefault(); onClose(); }}
+      width="max-w-md"
+      footer={
+        <button type="submit" style={{ borderColor: C.line, color: C.ink }} className="f-body text-sm px-4 py-2 rounded border bg-white ml-auto">
+          Close
+        </button>
+      }
+    >
+      <div className="p-5">
+        {state.status === "loading" && <p style={{ color: C.steel }} className="f-body text-sm text-center py-6">Loading payments…</p>}
+        {state.status === "error" && <DialogError error={`Could not load the payments. ${state.message}`} />}
+        {state.status === "ready" && state.payments.length === 0 && (
+          <p style={{ color: C.steel }} className="f-body text-sm text-center py-6">No payments recorded yet.</p>
+        )}
+        {state.status === "ready" && state.payments.length > 0 && (
+          <>
+            <div style={{ background: C.card, borderColor: C.line }} className="border rounded p-3 flex items-center justify-between mb-3">
+              <span style={{ color: C.steel }} className="f-mono text-[10px] uppercase tracking-wider">Total received</span>
+              <span data-testid="total-received" style={{ color: C.green }} className="f-display text-lg font-bold">{fmtINR(total)}</span>
+            </div>
+            <ul style={{ borderColor: C.line }} className="border rounded divide-y divide-stone-200 bg-white">
+              {state.payments.map((p) => (
+                <li key={p.id} data-testid="payment-row" className="px-3 py-2.5 flex items-start justify-between gap-3">
+                  <div>
+                    <div style={{ color: C.ink }} className="f-body text-sm font-semibold">{fmtDate(p.receivedAt)}</div>
+                    {p.note && <div style={{ color: C.steel }} className="f-body text-xs mt-0.5">{p.note}</div>}
+                  </div>
+                  <div style={{ color: C.green }} className="f-display text-sm font-bold shrink-0">{fmtINR(p.amount)}</div>
+                </li>
+              ))}
+            </ul>
+          </>
+        )}
+        <p style={{ color: C.steel }} className="f-body text-xs mt-3">
+          Still outstanding: <strong>{client.due > 0 ? fmtINR(client.due) : "nothing"}</strong>
+        </p>
       </div>
     </Modal>
   );
@@ -1055,6 +1130,9 @@ function Payments() {
   // null = closed, "new" = adding, a client = editing it.
   const [editing, setEditing] = useState(null);
   const [paying, setPaying] = useState(null);
+  const [history, setHistory] = useState(null);
+  // Mock mode only: payments recorded in this browser, newest first, by client id.
+  const [localPayments, setLocalPayments] = useState({});
 
   const replaceClient = (id, changes) => setClients((prev) => prev.map((c) => (c.id === id ? { ...c, ...changes } : c)));
 
@@ -1076,9 +1154,25 @@ function Payments() {
     setClients((prev) => prev.filter((c) => c.id !== id));
   };
 
-  const savePayment = async (client, amount) => {
-    replaceClient(client.id, useApi ? await recordPayment(client, amount) : paymentPatchBody(client, amount));
+  const savePayment = async (client, amount, note) => {
+    if (useApi) {
+      replaceClient(client.id, (await recordPayment(client, amount, note)).client);
+      return;
+    }
+    replaceClient(client.id, paymentPatchBody(client, amount));
+    setLocalPayments((prev) => {
+      const earlier = prev[client.id] ?? [];
+      const payment = { id: earlier.length + 1, clientId: client.id, amount: parseRupees(amount), note: note.trim() || null, receivedAt: today };
+      return { ...prev, [client.id]: [payment, ...earlier] };
+    });
   };
+
+  // Stable while the dialog is open, so it loads once.
+  const historyId = history?.id;
+  const loadHistory = useMemo(
+    () => () => (useApi ? fetchPayments(historyId) : Promise.resolve(localPayments[historyId] ?? [])),
+    [useApi, historyId, localPayments]
+  );
 
   useEffect(() => {
     if (!useApi) return undefined;
@@ -1214,7 +1308,7 @@ function Payments() {
 
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
           {visible.map((c) => (
-            <ClientCard key={c.id} client={c} onCallLogged={logCall} onEdit={setEditing} onPayment={setPaying} busy={saving.has(c.id)} />
+            <ClientCard key={c.id} client={c} onCallLogged={logCall} onEdit={setEditing} onPayment={setPaying} onHistory={setHistory} busy={saving.has(c.id)} />
           ))}
         </div>
         </>)}
@@ -1230,6 +1324,7 @@ function Payments() {
         />
       )}
       {paying && <PaymentForm key={paying.id} client={paying} onSave={savePayment} onClose={() => setPaying(null)} />}
+      {history && <PaymentHistory key={history.id} client={clients.find((c) => c.id === history.id) ?? history} load={loadHistory} onClose={() => setHistory(null)} />}
     </div>
   );
 }

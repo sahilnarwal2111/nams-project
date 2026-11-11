@@ -143,11 +143,22 @@ export function paymentError(client, amount) {
   return null;
 }
 
-// Body for PATCH /api/clients/:id when a payment is received: the amount comes
-// off the dues, and a client who has cleared everything becomes "paid".
+// What a received payment changes on the client: the amount comes off the
+// dues, and a client who has cleared everything becomes "paid". The server
+// applies the same rule; this copy is for mock mode.
 export function paymentPatchBody(client, amount) {
   const due = client.due - parseRupees(amount);
   return due === 0 ? { due, status: "paid" } : { due };
+}
+
+// Body for POST /api/clients/:id/payments.
+export function paymentToApi(amount, note) {
+  return { amount: parseRupees(amount), note: blankToNull(note) };
+}
+
+// A payment from the API: the moment it was received becomes the viewer's local day.
+export function paymentFromApi(p) {
+  return { ...p, receivedAt: instantFromApi(p.receivedAt) };
 }
 
 // Next c# id for a client created in mock mode: highest number + 1.
@@ -307,13 +318,18 @@ export async function updateClient(id, form) {
   );
 }
 
-export async function recordPayment(client, amount) {
-  return clientFromApi(
-    await request(`/api/clients/${encodeURIComponent(client.id)}`, {
-      method: "PATCH",
-      body: JSON.stringify(paymentPatchBody(client, amount)),
-    })
-  );
+// Stores the payment and lowers the dues on the server in one step. Returns
+// the updated client and the stored payment.
+export async function recordPayment(client, amount, note) {
+  const result = await request(`/api/clients/${encodeURIComponent(client.id)}/payments`, {
+    method: "POST",
+    body: JSON.stringify(paymentToApi(amount, note)),
+  });
+  return { client: clientFromApi(result.client), payment: paymentFromApi(result.payment) };
+}
+
+export async function fetchPayments(clientId) {
+  return (await request(`/api/clients/${encodeURIComponent(clientId)}/payments`)).map(paymentFromApi);
 }
 
 export async function deleteClient(id) {

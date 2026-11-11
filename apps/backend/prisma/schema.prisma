@@ -55,4 +55,19 @@ model Client {
   // Matches PAY_STATUS_META keys: "paid" | "due-soon" | "overdue"
   status      String
   notes       String?
+  payments    Payment[]
+}
+
+// Money received from a client. Recording one lowers Client.due in the same
+// transaction, so the payments are the history behind the current balance.
+model Payment {
+  id         Int      @id @default(autoincrement())
+  clientId   String
+  client     Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  // Whole rupees, always more than zero.
+  amount     Int
+  receivedAt DateTime @default(now())
+  note       String?
+
+  @@index([clientId])
 }
