@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  sessionRole,
+  paymentPending,
   daysAgo,
   enquiryError,
   enquiryToApi,
@@ -350,4 +352,29 @@ test("daysAgo says Today for today's date late in the evening", (t) => {
   t.mock.timers.enable({ apis: ["Date"], now: new Date(2026, 10, 11, 21, 45) });
   assert.equal(daysAgo("2026-11-11"), "Today");
   assert.equal(daysAgo("2026-11-10"), "1 day ago");
+});
+
+test("sessionRole is admin only when the server says so or sign-in is off", () => {
+  assert.equal(sessionRole({ required: false, authenticated: false, role: "admin" }), "admin");
+  assert.equal(sessionRole({ required: false, authenticated: false }), "admin");
+  assert.equal(sessionRole({ required: true, authenticated: true, role: "admin" }), "admin");
+  assert.equal(sessionRole({ required: true, authenticated: true, role: "staff" }), "staff");
+  assert.equal(sessionRole({ required: true, authenticated: true }), "staff", "an older server with no role");
+  assert.equal(sessionRole({ required: true, authenticated: true, role: "owner" }), "staff");
+  assert.equal(sessionRole({ required: true, authenticated: false, role: null }), "staff");
+});
+
+test("paymentPending uses the amount when known and the status when it is hidden", () => {
+  assert.equal(paymentPending({ due: 5000, status: "overdue" }), true);
+  assert.equal(paymentPending({ due: 0, status: "paid" }), false);
+  assert.equal(paymentPending({ due: 0, status: "overdue" }), false, "the amount wins for an admin");
+  assert.equal(paymentPending({ status: "overdue" }), true);
+  assert.equal(paymentPending({ status: "due-soon" }), true);
+  assert.equal(paymentPending({ status: "paid" }), false);
+});
+
+test("clientFromApi keeps a client without an amount as it is", () => {
+  const c = clientFromApi({ id: "c1", name: "A", status: "overdue", invoiceDate: "2026-05-12T00:00:00.000Z", lastCall: "2026-07-18T10:00:00.000Z" });
+  assert.equal("due" in c, false);
+  assert.equal(c.invoiceDate, "2026-05-12");
 });

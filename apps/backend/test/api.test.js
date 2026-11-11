@@ -760,7 +760,7 @@ async function withLogin(fn) {
 
 test("with no APP_PASSWORD the API is open and the session says login is not required", async () => {
   assert.equal(process.env.APP_PASSWORD, undefined);
-  assert.deepEqual(await (await get("/api/auth/session")).json(), { required: false, authenticated: false });
+  assert.deepEqual(await (await get("/api/auth/session")).json(), { required: false, authenticated: false, role: "admin" });
   assert.equal((await get("/api/tasks")).status, 200);
   assert.equal((await signIn("anything")).status, 400);
 });
@@ -778,7 +778,7 @@ test("with APP_PASSWORD set, data endpoints need a token but health and session 
     assert.equal((await get("/api/clients/c1/payments")).status, 401);
     assert.equal((await post("/api/clients/c1/payments", { amount: 1 })).status, 401);
     assert.equal((await get("/api/health")).status, 200);
-    assert.deepEqual(await (await get("/api/auth/session")).json(), { required: true, authenticated: false });
+    assert.deepEqual(await (await get("/api/auth/session")).json(), { required: true, authenticated: false, role: null });
   });
   assert.equal(await prisma.client.count({ where: { id: "c1" } }), 1, "an unauthenticated delete went through");
 });
@@ -787,12 +787,13 @@ test("the right password gives a token that opens the API", async () => {
   await withLogin(async () => {
     const res = await signIn(PASSWORD);
     assert.equal(res.status, 200);
-    const { token, expiresAt } = await res.json();
+    const { token, expiresAt, role } = await res.json();
+    assert.equal(role, "staff", "the office password signs in as staff");
     assert.ok(Date.parse(expiresAt) > Date.now() + TOKEN_TTL_MS - 60_000);
 
     assert.equal((await authed("/api/tasks", token)).status, 200);
     assert.equal((await authed("/api/clients", token)).status, 200);
-    assert.deepEqual(await (await authed("/api/auth/session", token)).json(), { required: true, authenticated: true });
+    assert.deepEqual(await (await authed("/api/auth/session", token)).json(), { required: true, authenticated: true, role: "staff" });
   });
 });
 
@@ -808,16 +809,21 @@ test("a wrong or missing password is refused", async () => {
 
 test("forged, altered and expired tokens are refused", async () => {
   await withLogin(async () => {
-    const { token } = issueToken();
-    const [expires, signature] = token.split(".");
-    const expired = issueToken(Date.now() - TOKEN_TTL_MS - 1000).token;
+    const { token } = issueToken("staff");
+    const [role, expires, signature] = token.split(".");
+    assert.equal(role, "staff");
+    const expired = issueToken("staff", Date.now() - TOKEN_TTL_MS - 1000).token;
     const bad = [
       "",
       "garbage",
-      `${Number(expires) + 1000}.${signature}`,
-      `${expires}.${signature.slice(0, -2)}xx`,
-      `${expires}.`,
-      `${expires}.${signature}.extra`,
+      `staff.${Number(expires) + 1000}.${signature}`,
+      `staff.${expires}.${signature.slice(0, -2)}xx`,
+      `staff.${expires}.`,
+      `staff.${expires}.${signature}.extra`,
+      `${expires}.${signature}`,
+      `admin.${expires}.${signature}`,
+      `owner.${expires}.${signature}`,
+      `__proto__.${expires}.${signature}`,
       expired,
     ];
     for (const t of bad) {
@@ -1019,5 +1025,161 @@ test("with login on, anyone can send an enquiry but only staff can read or chang
     });
   } finally {
     await cleanEnquiries();
+  }
+});
+
+// --- Roles: staff see who has paid, only an admin sees amounts ---
+
+const ADMIN_PASSWORD = "test-admin-password";
+const jsonBody = (method, body) => ({ method, headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+
+// Login on with both passwords; hands the test a token for each role.
+async function withRoles(fn) {
+  await withLogin(async () => {
+    process.env.ADMIN_PASSWORD = ADMIN_PASSWORD;
+    try {
+      const staff = await (await signIn(PASSWORD)).json();
+      const admin = await (await signIn(ADMIN_PASSWORD)).json();
+      await fn({ staff: staff.token, admin: admin.token, staffLogin: staff, adminLogin: admin });
+    } finally {
+      delete process.env.ADMIN_PASSWORD;
+    }
+  });
+}
+
+test("each password signs in with its own role, and the session reports it", async () => {
+  await withRoles(async ({ staff, admin, staffLogin, adminLogin }) => {
+    assert.equal(staffLogin.role, "staff");
+    assert.equal(adminLogin.role, "admin");
+    assert.deepEqual(await (await authed("/api/auth/session", staff)).json(), { required: true, authenticated: true, role: "staff" });
+    assert.deepEqual(await (await authed("/api/auth/session", admin)).json(), { required: true, authenticated: true, role: "admin" });
+    assert.deepEqual(await (await get("/api/auth/session")).json(), { required: true, authenticated: false, role: null });
+  });
+});
+
+test("staff get the client list without amounts; an admin gets them", async () => {
+  await withRoles(async ({ staff, admin }) => {
+    const forStaff = await (await authed("/api/clients", staff)).json();
+    assert.equal(forStaff.length, 6);
+    for (const c of forStaff) {
+      assert.equal("due" in c, false, `${c.id} must not carry the amount`);
+      assert.ok(["paid", "due-soon", "overdue"].includes(c.status));
+      assert.ok(c.name && c.phone && c.lastCall);
+    }
+    const forAdmin = await (await authed("/api/clients", admin)).json();
+    assert.equal(forAdmin.find((c) => c.id === "c1").due, 184000);
+  });
+});
+
+test("staff can log a reminder call and the reply still has no amount", async () => {
+  const before = await prisma.client.findUnique({ where: { id: "c2" } });
+  try {
+    await withRoles(async ({ staff }) => {
+      const res = await authed("/api/clients/c2", staff, jsonBody("PATCH", {}));
+      assert.equal(res.status, 200);
+      const body = await res.json();
+      assert.equal("due" in body, false);
+      assert.ok(Date.parse(body.lastCall) > before.lastCall.getTime());
+    });
+  } finally {
+    await prisma.client.update({ where: { id: "c2" }, data: { lastCall: before.lastCall } });
+  }
+});
+
+test("staff cannot add, edit or delete clients, or see or record payments", async () => {
+  const before = await prisma.client.findUnique({ where: { id: "c1" } });
+  const count = await prisma.client.count();
+  const payments = await prisma.payment.count();
+  await withRoles(async ({ staff }) => {
+    const newClient = { name: "Role Test Client", contact: "A", phone: "1", due: 100, invoiceDate: "2026-11-01", status: "due-soon" };
+    const attempts = [
+      ["/api/clients", jsonBody("POST", newClient)],
+      ["/api/clients/c1", jsonBody("PATCH", { due: 1 })],
+      ["/api/clients/c1", jsonBody("PATCH", { status: "paid" })],
+      ["/api/clients/c1", jsonBody("PATCH", { notes: "changed" })],
+      ["/api/clients/c1", { method: "DELETE" }],
+      ["/api/clients/c1/payments", {}],
+      ["/api/clients/c1/payments", jsonBody("POST", { amount: 1000 })],
+    ];
+    for (const [path, options] of attempts) {
+      const res = await authed(path, staff, options);
+      assert.equal(res.status, 403, `${options.method ?? "GET"} ${path} ${options.body ?? ""}`);
+      const text = await res.text();
+      assert.match(text, /admin/i);
+      assert.doesNotMatch(text, /184000/);
+    }
+  });
+  assert.deepEqual(await prisma.client.findUnique({ where: { id: "c1" } }), before);
+  assert.equal(await prisma.client.count(), count);
+  assert.equal(await prisma.payment.count(), payments);
+});
+
+test("an admin can edit a client and record a payment", async () => {
+  const before = await prisma.client.findUnique({ where: { id: "c3" } });
+  try {
+    await withRoles(async ({ admin }) => {
+      const edited = await authed("/api/clients/c3", admin, jsonBody("PATCH", { notes: "admin edit" }));
+      assert.equal(edited.status, 200);
+      assert.equal((await edited.json()).due, before.due);
+      const paid = await authed("/api/clients/c3/payments", admin, jsonBody("POST", { amount: 2000 }));
+      assert.equal(paid.status, 201);
+      assert.equal((await paid.json()).client.due, before.due - 2000);
+      assert.equal((await authed("/api/clients/c3/payments", admin)).status, 200);
+    });
+  } finally {
+    await prisma.payment.deleteMany({ where: { clientId: "c3" } });
+    await prisma.client.update({ where: { id: "c3" }, data: { due: before.due, status: before.status, notes: before.notes } });
+  }
+});
+
+test("staff and admin can both use the Work Board and enquiries", async () => {
+  await withRoles(async ({ staff, admin }) => {
+    for (const token of [staff, admin]) {
+      assert.equal((await authed("/api/tasks", token)).status, 200);
+      assert.equal((await authed("/api/employees", token)).status, 200);
+      assert.equal((await authed("/api/enquiries", token)).status, 200);
+    }
+  });
+});
+
+test("a token cannot be relabelled as admin, and each role's token dies with its own password", async () => {
+  await withRoles(async ({ staff, admin }) => {
+    const relabelled = staff.replace(/^staff\./, "admin.");
+    assert.equal((await authed("/api/clients", relabelled)).status, 401);
+
+    process.env.ADMIN_PASSWORD = "changed-admin-password";
+    assert.equal((await authed("/api/clients", admin)).status, 401, "old admin token");
+    assert.equal((await authed("/api/clients", staff)).status, 200, "staff are not signed out");
+    process.env.ADMIN_PASSWORD = ADMIN_PASSWORD;
+
+    delete process.env.ADMIN_PASSWORD;
+    assert.equal((await authed("/api/clients", admin)).status, 401, "no admin password, no admin");
+    assert.equal((await signIn(ADMIN_PASSWORD)).status, 401);
+    process.env.ADMIN_PASSWORD = ADMIN_PASSWORD;
+  });
+});
+
+test("with only the office password set, nobody sees amounts", async () => {
+  await withLogin(async () => {
+    const { token, role } = await (await signIn(PASSWORD)).json();
+    assert.equal(role, "staff");
+    const list = await (await authed("/api/clients", token)).json();
+    assert.equal(list.some((c) => "due" in c), false);
+    assert.equal((await authed("/api/clients/c1/payments", token)).status, 403);
+  });
+});
+
+test("with only the admin password set, login is still required and that password is admin", async () => {
+  process.env.ADMIN_PASSWORD = ADMIN_PASSWORD;
+  clearFailedLogins();
+  try {
+    assert.equal((await get("/api/clients")).status, 401);
+    assert.equal((await signIn(PASSWORD)).status, 401);
+    const { token, role } = await (await signIn(ADMIN_PASSWORD)).json();
+    assert.equal(role, "admin");
+    assert.equal((await (await authed("/api/clients", token)).json())[0].due, 184000);
+  } finally {
+    delete process.env.ADMIN_PASSWORD;
+    clearFailedLogins();
   }
 });

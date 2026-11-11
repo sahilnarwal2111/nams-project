@@ -28,5 +28,7 @@ services:
         sync: false
       - key: CORS_ORIGINS # comma-separated frontend origins, * wildcards allowed
         sync: false
-      - key: APP_PASSWORD # staff sign-in password; while unset the API is open to anyone
+      - key: APP_PASSWORD # office password: staff sign-in, no money amounts
+        sync: false
+      - key: ADMIN_PASSWORD # admin sign-in: amounts, payments and client records
         sync: false

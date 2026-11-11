@@ -264,6 +264,21 @@ export function authHeaders(token = getToken()) {
 }
 
 // What the app should show for the answer from GET /api/auth/session.
+// "admin" sees money amounts; "staff" sees only whether payment is received or
+// pending. With sign-in switched off the server treats everyone as an admin.
+// Anything unexpected counts as staff, the narrower view. The server enforces
+// this too: staff are never sent the amounts.
+export function sessionRole(session) {
+  if (!session.required) return "admin";
+  return session.role === "admin" ? "admin" : "staff";
+}
+
+// Whether a client still owes money. Staff are not sent the amount, so for
+// them the status decides.
+export function paymentPending(client) {
+  return typeof client.due === "number" ? client.due > 0 : client.status !== "paid";
+}
+
 export function sessionState(session) {
   if (!session.required) return "open";
   return session.authenticated ? "signedIn" : "login";
@@ -374,12 +389,14 @@ export async function deleteClient(id) {
 }
 
 export async function fetchSession() {
-  return sessionState(await request("/api/auth/session"));
+  const session = await request("/api/auth/session");
+  return { state: sessionState(session), role: sessionRole(session) };
 }
 
 export async function login(password) {
-  const { token } = await request("/api/auth/login", { method: "POST", body: JSON.stringify({ password }) });
+  const { token, role } = await request("/api/auth/login", { method: "POST", body: JSON.stringify({ password }) });
   setToken(token);
+  return role === "admin" ? "admin" : "staff";
 }
 
 export function logout() {
