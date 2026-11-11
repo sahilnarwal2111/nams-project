@@ -67,7 +67,21 @@ apps/backend/
   test/api.test.js         node:test suite hitting the real app over HTTP
 ```
 
-Endpoints today: `GET /api/health`, `GET /api/employees`, `GET /api/tasks`, `GET /api/tasks/:id` (404 if unknown), `POST /api/tasks` (body `{ title, client, assigneeId, priority, status? }`; `status` defaults to `todo`; id generated as highest `NK-###` + 1; 201 with the task, 400 `{ error }` on missing/empty fields, invalid `priority`/`status`, or unknown `assigneeId`), `PATCH /api/tasks/:id` (body: any of `title`, `client`, `assigneeId`, `priority`, `status`; only the fields sent change; `id`/`updatedAt` are ignored; 400 `{ error }` on an empty body, empty `title`/`client`, invalid `priority`/`status`, or unknown `assigneeId`; 404 if the task is unknown), `DELETE /api/tasks/:id` (permanently deletes; 204 with no body, 404 `{ error }` if the task is unknown), `GET /api/clients`, `POST /api/clients` (body: required `name`, `contact`, `phone` non-empty strings, `due` integer >= 0 rupees, `invoiceDate`, `status` `paid|due-soon|overdue`; optional `notes`, `lastCall` (defaults to now); dates accept `YYYY-MM-DD` or a full ISO timestamp; id generated as highest `c#` + 1; 201 with the client, 400 `{ error }` on a missing field, invalid `status`, negative/non-integer `due`, or unparseable date), `PATCH /api/clients/:id` (body: any of `name`, `contact`, `phone`, `due`, `invoiceDate`, `lastCall`, `status`, `notes`, validated like `POST /api/clients` (`notes` may be `null` to clear it); only the fields sent change and `lastCall` is untouched unless sent; `id` and unknown keys are ignored; with no body, an empty body, or no editable fields it logs a call, setting `lastCall` to now; 400 `{ error }` on any invalid field, including `null` for anything but `notes`; 404 if the client is unknown), `DELETE /api/clients/:id` (permanently deletes; 204 with no body, 404 `{ error }` if the client is unknown).
+Endpoints today (all under `/api`):
+
+| Method and path | Request body | Success | Errors |
+| --- | --- | --- | --- |
+| `GET /api/health` | none | 200 `{ status: "ok" }` | none |
+| `GET /api/employees` | none | 200, list of employees | none |
+| `GET /api/tasks` | none | 200, list of tasks | none |
+| `GET /api/tasks/:id` | none | 200, the task | 404 if the task is unknown |
+| `POST /api/tasks` | `{ title, client, assigneeId, priority, status? }`; `status` defaults to `todo` | 201, the task; id generated as highest `NK-###` + 1 | 400 `{ error }` on missing/empty fields, invalid `priority`/`status`, or unknown `assigneeId` |
+| `PATCH /api/tasks/:id` | any of `title`, `client`, `assigneeId`, `priority`, `status`; only the fields sent change; `id`/`updatedAt` are ignored | 200, the updated task | 400 `{ error }` on an empty body, empty `title`/`client`, invalid `priority`/`status`, or unknown `assigneeId`; 404 if the task is unknown |
+| `DELETE /api/tasks/:id` | none | 204, no body; permanently deletes | 404 `{ error }` if the task is unknown |
+| `GET /api/clients` | none | 200, list of clients | none |
+| `POST /api/clients` | required `name`, `contact`, `phone` (non-empty strings), `due` (integer >= 0 rupees), `invoiceDate`, `status` (`paid\|due-soon\|overdue`); optional `notes`, `lastCall` (defaults to now); dates accept `YYYY-MM-DD` or a full ISO timestamp | 201, the client; id generated as highest `c#` + 1 | 400 `{ error }` on a missing field, invalid `status`, negative/non-integer `due`, or unparseable date |
+| `PATCH /api/clients/:id` | any of `name`, `contact`, `phone`, `due`, `invoiceDate`, `lastCall`, `status`, `notes`, validated like `POST /api/clients` (`notes` may be `null` to clear it); only the fields sent change and `lastCall` is untouched unless sent; `id` and unknown keys are ignored; with no body, an empty body, or no editable fields it logs a call, setting `lastCall` to now | 200, the updated client | 400 `{ error }` on any invalid field, including `null` for anything but `notes`; 404 if the client is unknown |
+| `DELETE /api/clients/:id` | none | 204, no body; permanently deletes | 404 `{ error }` if the client is unknown |
 
 Design decisions to preserve:
 
