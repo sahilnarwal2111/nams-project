@@ -4,10 +4,10 @@ import { createTask, deleteTask, getTask, listTasks, updateTask } from "../contr
 
 export const tasksRouter = Router();
 
-// Everyone signed in can see the board. Only an admin creates or deletes work;
-// updateTask lets staff change only the work assigned to them.
+// Everyone signed in can see the board, add work and move any card between
+// statuses. updateTask limits who may edit the details. Only an admin deletes.
 tasksRouter.get("/", listTasks);
-tasksRouter.post("/", requireAdmin, createTask);
+tasksRouter.post("/", createTask);
 tasksRouter.get("/:id", getTask);
 tasksRouter.patch("/:id", updateTask);
 tasksRouter.delete("/:id", requireAdmin, deleteTask);

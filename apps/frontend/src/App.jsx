@@ -8,7 +8,10 @@ import {
   daysAgo, paymentPending, enquiryError,
   fetchTeam, canEditTask, viewerLabel, signInChoices, defaultSignInChoice, personalPasswordError, setEmployeePassword, clearEmployeePassword, sendEnquiry, fetchEnquiries, updateEnquiryStatus, deleteEnquiry,
 } from "./api.js";
-import { filterTasks, sortTasks, isOverdue, SORT_MODES, workCounts } from "./board.js";
+import {
+  filterTasks, sortTasks, isOverdue, SORT_MODES, workCounts,
+  boardTasks, completedTasks, completedByMonth, RECENT_DAYS,
+} from "./board.js";
 import { pageFromHash, hashForPage, anchorFromHash } from "./route.js";
 import {
   Ruler, Route, Building2, Droplets, Plane, Waves,
@@ -161,7 +164,7 @@ function TopNav({ page, setPage, onSignOut, userName, showTeam }) {
         {/* Desktop Menu */}
         <nav className="hidden md:flex items-center gap-1">
           {items.map((it) => {
-            const active = page === it.id;
+            const active = page === it.id || (it.id === "work" && page === "completed");
             return (
               <button
                 key={it.id}
@@ -206,7 +209,7 @@ function TopNav({ page, setPage, onSignOut, userName, showTeam }) {
       {open && (
         <div style={{ background: C.navyDeep, borderBottom: `1px solid ${C.lineDark}` }} className="md:hidden px-4 pt-2 pb-4 space-y-1">
           {items.map((it) => {
-            const active = page === it.id;
+            const active = page === it.id || (it.id === "work" && page === "completed");
             return (
               <button
                 key={it.id}
@@ -485,7 +488,7 @@ function AccessNote({ testId, icon: Icon = Info, title, children, actionLabel, o
 /* ---------------------------------------------------------------
    WORK BOARD
 ------------------------------------------------------------------*/
-// canEdit decides whether the edit and move buttons are shown.
+// Anyone signed in can move a card. canEdit decides whether the edit button is shown.
 function TaskCard({ task, employees, onMove, onEdit, busy, today, canEdit }) {
   const emp = employees.find((e) => e.id === task.assignee);
   const pr = PRIORITY_META[task.priority];
@@ -551,7 +554,7 @@ function TaskCard({ task, employees, onMove, onEdit, busy, today, canEdit }) {
         </div>
 
         <div className="flex items-center gap-1">
-          {canEdit && idx > 0 && (
+          {idx > 0 && (
             <button
               onClick={() => onMove(task.id, order[idx - 1])}
               disabled={busy}
@@ -561,7 +564,7 @@ function TaskCard({ task, employees, onMove, onEdit, busy, today, canEdit }) {
               <ArrowLeft size={13} />
             </button>
           )}
-          {canEdit && idx < order.length - 1 && (
+          {idx < order.length - 1 && (
             <button
               onClick={() => onMove(task.id, order[idx + 1])}
               disabled={busy}
@@ -689,11 +692,12 @@ function Field({ label, required, children }) {
 
 // Create (task = null) or edit a work item. onSave and onDelete return promises;
 // a rejection is shown in the form and the form stays open.
-// Only an admin may reassign or delete work.
-function WorkForm({ task, employees, onSave, onDelete, onClose, isAdmin = true }) {
+// Anyone can add work for anyone. Only an admin may reassign or delete existing
+// work. defaultAssignee preselects a person when they add work themselves.
+function WorkForm({ task, employees, onSave, onDelete, onClose, isAdmin = true, defaultAssignee = null }) {
   const [form, setForm] = useState(() => ({
     ...EMPTY_WORK,
-    assignee: employees[0]?.id ?? "",
+    assignee: (employees.some((e) => e.id === defaultAssignee) ? defaultAssignee : employees[0]?.id) ?? "",
     ...(task
       ? Object.fromEntries(Object.keys(EMPTY_WORK).map((k) => [k, task[k] ?? EMPTY_WORK[k]]))
       : {}),
@@ -786,7 +790,7 @@ function WorkForm({ task, employees, onSave, onDelete, onClose, isAdmin = true }
           </Field>
           <div className="sm:col-span-2">
             <Field label="Assign to" required>
-              <select name="assignee" value={form.assignee} onChange={set("assignee")} required disabled={!isAdmin} title={isAdmin ? undefined : "Only an admin can reassign work"} style={line} className={`${INPUT_CLASS} disabled:bg-stone-100 disabled:text-stone-500`}>
+              <select name="assignee" value={form.assignee} onChange={set("assignee")} required disabled={!isAdmin && Boolean(task)} title={!isAdmin && task ? "Only an admin can reassign work" : undefined} style={line} className={`${INPUT_CLASS} disabled:bg-stone-100 disabled:text-stone-500`}>
                 {employees.map((e) => <option key={e.id} value={e.id}>{e.name} ({e.role})</option>)}
               </select>
             </Field>
@@ -801,9 +805,73 @@ function WorkForm({ task, employees, onSave, onDelete, onClose, isAdmin = true }
 // viewer: { isAdmin, employeeId }. An admin creates, edits, moves and deletes
 // any work; a person signed in by name edits and moves only their own; the
 // office sign-in only looks. The API enforces the same rules.
-// access (API mode with sign-in on): { adminConfigured, onSwitchSignIn,
-// onOpenTeam }, used to explain missing buttons and point at the fix.
-function WorkBoard({ viewer = { isAdmin: true, employeeId: null }, access = null }) {
+const fmtMonth = (key) => new Date(`${key}-01T00:00:00`).toLocaleDateString("en-IN", { month: "long", year: "numeric" });
+
+// Every finished piece of work, newest first, in month groups. Anyone can
+// reopen one, which moves it back to In Progress on the board.
+function CompletedList({ tasks, total, employees, saving, viewer, onReopen, onEdit }) {
+  const groups = completedByMonth(tasks);
+  if (tasks.length === 0) {
+    return (
+      <div style={{ borderColor: C.line, color: C.steel, background: C.card }} className="border border-dashed rounded-md p-10 text-center f-body text-sm">
+        {total === 0 ? "No work has been completed yet. Work moved to Completed on the board is listed here." : "No completed work matches this search or person."}
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-6">
+      {groups.map((group) => (
+        <section key={group.key ?? "undated"} data-testid="completed-group">
+          <h3 style={{ color: C.steel }} className="f-mono text-xs font-semibold uppercase tracking-wider mb-2 px-1">
+            {group.key ? fmtMonth(group.key) : "Earlier, date not recorded"} · {group.tasks.length}
+          </h3>
+          <div style={{ background: C.card, borderColor: C.line }} className="border rounded-md shadow-sm divide-y divide-stone-200/70">
+            {group.tasks.map((task) => {
+              const emp = employees.find((e) => e.id === task.assignee);
+              return (
+                <div key={task.id} data-testid="completed-row" className="px-4 py-3 flex flex-col md:flex-row md:items-center gap-2 md:gap-4">
+                  <span style={{ color: C.steel }} className="f-mono text-[11px] font-medium md:w-16 shrink-0">{task.id}</span>
+                  <div className="min-w-0 flex-1">
+                    <div style={{ color: C.ink }} className="f-body text-sm font-semibold leading-snug">{task.title}</div>
+                    <div style={{ color: C.steel }} className="f-body text-xs">{task.client}{task.district ? ` · ${task.district}` : ""}</div>
+                  </div>
+                  <div className="flex items-center gap-2 md:w-36 shrink-0">
+                    <div style={{ background: C.navy, color: C.paper }} className="w-6 h-6 rounded-full flex items-center justify-center f-mono text-[10px] font-bold shrink-0">{emp?.initials}</div>
+                    <span style={{ color: C.steel }} className="f-body text-xs font-medium">{emp?.name}</span>
+                  </div>
+                  <div style={{ color: task.completedAt ? C.green : C.steel }} className="f-body text-xs flex items-center gap-1.5 md:w-32 shrink-0">
+                    <CircleCheck size={12} /> {task.completedAt ? fmtDate(task.completedAt) : "Date not recorded"}
+                  </div>
+                  <div className="flex items-center gap-1 shrink-0">
+                    <button
+                      onClick={() => onReopen(task.id)}
+                      disabled={saving.has(task.id)}
+                      aria-label={`Reopen ${task.id}`}
+                      style={{ borderColor: C.line, color: C.ink }}
+                      className="f-body text-xs font-semibold px-3 py-1.5 rounded border bg-white hover:bg-stone-50 disabled:opacity-40 inline-flex items-center gap-1"
+                    >
+                      <ArrowLeft size={12} /> Reopen
+                    </button>
+                    {canEditTask(task, viewer) && (
+                      <button onClick={() => onEdit(task)} aria-label={`Edit ${task.id}`} style={{ color: C.steel }} className="p-1.5 rounded hover:bg-stone-100">
+                        <Pencil size={13} />
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      ))}
+    </div>
+  );
+}
+
+// view is "board" or "completed" (the list of all finished work); onView
+// switches between them. access (API mode with sign-in on): { adminConfigured,
+// onSwitchSignIn, onOpenTeam }, used to explain what a sign-in can do.
+function WorkBoard({ viewer = { isAdmin: true, employeeId: null }, access = null, view = "board", onView = () => {} }) {
   const useApi = hasApi();
   const [tasks, setTasks] = useState(useApi ? [] : INITIAL_TASKS);
   const [employees, setEmployees] = useState(useApi ? [] : EMPLOYEES);
@@ -871,7 +939,7 @@ function WorkBoard({ viewer = { isAdmin: true, employeeId: null }, access = null
   // saved could otherwise roll back to a status the server never had.
   const moveTask = (id, status) => {
     const task = tasks.find((t) => t.id === id);
-    if (!task || task.status === status || saving.has(id) || !canEditTask(task, viewer)) return;
+    if (!task || task.status === status || saving.has(id)) return;
     const prevStatus = task.status;
     setSaveError(null);
     setStatus(id, status);
@@ -885,10 +953,14 @@ function WorkBoard({ viewer = { isAdmin: true, employeeId: null }, access = null
       .finally(() => setSaving((prev) => { const next = new Set(prev); next.delete(id); return next; }));
   };
 
-  const visible = useMemo(() => {
+  // The search and the person filter apply to both views.
+  const matching = useMemo(() => {
     const byStaff = filter === "all" ? tasks : tasks.filter((t) => t.assignee === filter);
-    return sortTasks(filterTasks(byStaff, query), sort);
-  }, [tasks, filter, query, sort]);
+    return filterTasks(byStaff, query);
+  }, [tasks, filter, query]);
+  // The board: open work plus work finished in the last week.
+  const visible = useMemo(() => sortTasks(boardTasks(matching, today), sort), [matching, today, sort]);
+  const completedMatching = useMemo(() => completedTasks(matching), [matching]);
   const overdueCount = tasks.filter((t) => isOverdue(t, today)).length;
   const columns = ["todo", "inprogress", "done"];
   const counts = { todo: 0, inprogress: 0, done: 0 };
@@ -903,12 +975,17 @@ function WorkBoard({ viewer = { isAdmin: true, employeeId: null }, access = null
           <div>
             <div style={{ color: C.orangeDeep }} className="f-mono text-xs font-semibold tracking-wider uppercase mb-1">Task Operations</div>
             <h1 style={{ color: C.ink }} className="f-display text-2xl sm:text-3xl font-bold">Project Work Board</h1>
-            {!viewer.isAdmin && viewer.employeeId && (
+            {!viewer.isAdmin && (
               <p data-testid="board-access" style={{ color: C.steel }} className="f-body text-sm mt-1">
-                You can update and move the work assigned to you. An admin adds and assigns new work.
+                {viewer.employeeId
+                  ? "You can add work and move any card. You can edit the details of work assigned to you."
+                  : "You can add work and move any card. To edit the details of your work, sign in with your own name."}
+                {!viewer.employeeId && access?.onSwitchSignIn && (
+                  <button onClick={access.onSwitchSignIn} style={{ color: C.blue }} className="font-semibold underline ml-2">Switch sign-in</button>
+                )}
               </p>
             )}
-            {load.state === "ready" && viewer.isAdmin && (
+            {load.state === "ready" && (
               <button
                 onClick={() => setEditing("new")}
                 style={{ background: C.orange, color: C.paper }}
@@ -928,20 +1005,9 @@ function WorkBoard({ viewer = { isAdmin: true, employeeId: null }, access = null
           </div>
         </div>
 
-        {/* Why buttons are missing, and what to do about it */}
-        {!viewer.isAdmin && !viewer.employeeId && (
-          <AccessNote testId="board-access" icon={Eye} title="View only: you are signed in with the office password" actionLabel="Switch sign-in" onAction={access?.onSwitchSignIn}>
-            <div>The buttons to add, edit and move work are hidden for this sign-in. Sign in with the admin password to manage all work, or with your own name to update the work assigned to you.</div>
-            {access && !access.adminConfigured && (
-              <div data-testid="no-admin-note" style={{ color: C.orangeDeep }} className="font-semibold mt-1">
-                No admin password is set on the server yet. Add ADMIN_PASSWORD in the Render dashboard first.
-              </div>
-            )}
-          </AccessNote>
-        )}
         {viewer.isAdmin && access && load.state === "ready" && employees.length > 0 && employees.every((e) => e.hasPassword === false) && (
           <AccessNote testId="team-hint" icon={KeyRound} title="Nobody has their own sign-in yet" actionLabel="Open Team page" onAction={access.onOpenTeam}>
-            <div>Until you set a password for each person on the Team page, only you can move and edit work. Everyone else can only look.</div>
+            <div>Everyone can add and move work. Until you set a password for each person on the Team page, only you can edit the details of work.</div>
           </AccessNote>
         )}
 
@@ -972,6 +1038,25 @@ function WorkBoard({ viewer = { isAdmin: true, employeeId: null }, access = null
           </div>
         )}
 
+        {/* Board or the list of all completed work */}
+        <div role="tablist" aria-label="Work views" style={{ borderColor: C.line }} className="flex items-center gap-1 border-b mb-5">
+          {[
+            { id: "board", label: "Board" },
+            { id: "completed", label: `Completed (${counts.done})` },
+          ].map((tab) => (
+            <button
+              key={tab.id}
+              role="tab"
+              aria-selected={view === tab.id}
+              onClick={() => onView(tab.id)}
+              style={{ color: view === tab.id ? C.orangeDeep : C.steel, borderColor: view === tab.id ? C.orange : "transparent" }}
+              className="f-body text-sm font-semibold px-4 py-2 border-b-2 -mb-px hover:text-stone-900"
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+
         {/* Search & Sort */}
         <div className="flex flex-col sm:flex-row sm:items-center gap-3 mb-4">
           <label className="relative flex-1 max-w-md">
@@ -986,7 +1071,7 @@ function WorkBoard({ viewer = { isAdmin: true, employeeId: null }, access = null
               className="f-body text-sm w-full rounded border pl-9 pr-3 py-2 bg-white shadow-sm focus:outline-none focus:ring-2 focus:ring-orange-300"
             />
           </label>
-          <label className="flex items-center gap-2">
+          {view === "board" && <label className="flex items-center gap-2">
             <span className="f-mono text-xs text-stone-500 shrink-0">Sort:</span>
             <select
               aria-label="Sort work"
@@ -997,8 +1082,8 @@ function WorkBoard({ viewer = { isAdmin: true, employeeId: null }, access = null
             >
               {SORT_MODES.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
             </select>
-          </label>
-          {overdueCount > 0 && (
+          </label>}
+          {view === "board" && overdueCount > 0 && (
             <span data-testid="overdue-count" style={{ background: "#FDF0EA", color: C.orangeDeep, borderColor: C.orangeDeep }} className="f-body text-xs font-semibold px-3 py-1.5 rounded border sm:ml-auto self-start sm:self-auto">
               {overdueCount} overdue
             </span>
@@ -1037,8 +1122,20 @@ function WorkBoard({ viewer = { isAdmin: true, employeeId: null }, access = null
           ))}
         </div>
 
+        {view === "completed" && (
+          <>
+            <p data-testid="completed-summary" style={{ color: C.steel }} className="f-body text-sm mb-4">
+              {completedMatching.length === counts.done
+                ? `${counts.done} completed, newest first.`
+                : `Showing ${completedMatching.length} of ${counts.done} completed.`}
+              {" "}The board keeps work finished in the last {RECENT_DAYS} days. Everything completed is listed here.
+            </p>
+            <CompletedList tasks={completedMatching} total={counts.done} employees={employees} saving={saving} viewer={viewer} onReopen={(id) => moveTask(id, "inprogress")} onEdit={setEditing} />
+          </>
+        )}
+
         {/* Kanban Columns */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+        {view === "board" && <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
           {columns.map((col) => {
             const colTasks = visible.filter((t) => t.status === col);
             return (
@@ -1047,6 +1144,7 @@ function WorkBoard({ viewer = { isAdmin: true, employeeId: null }, access = null
                   <div className="flex items-center gap-2">
                     <span style={{ background: STATUS_META[col].color }} className="w-2.5 h-2.5 rounded-full" />
                     <h3 style={{ color: C.ink }} className="f-body text-sm font-bold">{STATUS_META[col].label}</h3>
+                    {col === "done" && <span style={{ color: C.steel }} className="f-mono text-[10px] uppercase tracking-wider">last {RECENT_DAYS} days</span>}
                   </div>
                   <span style={{ color: C.steel, background: C.card }} className="f-mono text-xs px-2 py-0.5 rounded border border-stone-200 font-semibold">
                     {colTasks.length}
@@ -1059,14 +1157,24 @@ function WorkBoard({ viewer = { isAdmin: true, employeeId: null }, access = null
                   ))}
                   {colTasks.length === 0 && (
                     <div style={{ borderColor: C.line, color: C.steel }} className="border border-dashed rounded-md p-8 text-center f-body text-xs">
-                      {query.trim() ? "No work matches your search here." : "No assignments found in this status."}
+                      {query.trim() ? "No work matches your search here." : col === "done" ? `Nothing completed in the last ${RECENT_DAYS} days.` : "No assignments found in this status."}
                     </div>
+                  )}
+                  {col === "done" && counts.done > 0 && (
+                    <button
+                      data-testid="all-completed-link"
+                      onClick={() => onView("completed")}
+                      style={{ color: C.blue, borderColor: C.line }}
+                      className="f-body text-xs font-semibold w-full mt-1 px-3 py-2 rounded border bg-white hover:bg-stone-50 inline-flex items-center justify-center gap-1.5"
+                    >
+                      <History size={13} /> All completed work ({counts.done})
+                    </button>
                   )}
                 </div>
               </div>
             );
           })}
-        </div>
+        </div>}
         </>)}
       </div>
 
@@ -1079,6 +1187,7 @@ function WorkBoard({ viewer = { isAdmin: true, employeeId: null }, access = null
           onDelete={removeWork}
           onClose={() => setEditing(null)}
           isAdmin={viewer.isAdmin}
+          defaultAssignee={viewer.employeeId}
         />
       )}
     </div>
@@ -1885,8 +1994,8 @@ function Team({ viewer, access }) {
         <h1 style={{ color: C.ink }} className="f-display text-2xl sm:text-3xl font-bold flex items-center gap-2"><UserRound size={24} /> Team profiles</h1>
         <p style={{ color: C.steel }} className="f-body text-sm mt-1 mb-6">
           {viewer.isAdmin
-            ? "Each person has a profile. Give them a password here and tell them in person. They then pick their name on the sign-in screen and can update and move the work assigned to them."
-            : "Each person has a profile. Once the admin gives you a password, pick your name on the sign-in screen to update and move the work assigned to you."}
+            ? "Each person has a profile. Give them a password here and tell them in person. They then pick their name on the sign-in screen and can edit the details of the work assigned to them."
+            : "Each person has a profile. Once the admin gives you a password, pick your name on the sign-in screen to edit the details of the work assigned to you."}
         </p>
         {!viewer.isAdmin && (
           <AccessNote testId="team-access" icon={Eye} title="Only the admin can set or change passwords" actionLabel={viewer.employeeId ? undefined : "Switch sign-in"} onAction={viewer.employeeId ? undefined : access?.onSwitchSignIn}>
@@ -2015,7 +2124,7 @@ function SignIn({ people, methods, onSignIn }) {
           </select>
         </Field>
         {chosen.value === "shared" && methods.admin && methods.office && (
-          <p style={{ color: C.steel }} className="f-body text-xs mt-1.5">The admin password manages all work and shows amounts. The office password can only view.</p>
+          <p style={{ color: C.steel }} className="f-body text-xs mt-1.5">The admin password can edit and delete any work and shows amounts. The office password can add and move work.</p>
         )}
       </div>
       {chosen.ready ? (
@@ -2033,7 +2142,7 @@ function SignIn({ people, methods, onSignIn }) {
       )}
       {!methods.admin && (
         <div data-testid="no-admin-note" role="note" style={{ borderColor: C.orangeDeep, background: "#FDF0EA", color: C.orangeDeep }} className="border rounded-md px-3 py-2 mt-3 f-body text-sm">
-          No admin password is set on the server yet, so nobody can add or move work, set up profiles or see amounts. Add ADMIN_PASSWORD in the Render dashboard.
+          No admin password is set on the server yet, so nobody can set up profiles, delete work or see amounts. Add ADMIN_PASSWORD in the Render dashboard.
         </div>
       )}
       {error && (
@@ -2132,7 +2241,17 @@ export default function App() {
       />
       <main>
         {page === "home" && <Landing setPage={setPage} onEnquiry={hasApi() ? sendEnquiry : sendLocalEnquiry} />}
-        {page === "work" && <StaffOnly staff={staff}><WorkBoard key={`${staff.session.role}-${staff.session.employeeId}`} viewer={staff.viewer} access={access} /></StaffOnly>}
+        {(page === "work" || page === "completed") && (
+          <StaffOnly staff={staff}>
+            <WorkBoard
+              key={`${staff.session.role}-${staff.session.employeeId}`}
+              viewer={staff.viewer}
+              access={access}
+              view={page === "completed" ? "completed" : "board"}
+              onView={(next) => setPage(next === "completed" ? "completed" : "work")}
+            />
+          </StaffOnly>
+        )}
         {page === "payments" && <StaffOnly staff={staff}><Payments key={staff.session.role} isAdmin={staff.isAdmin} /></StaffOnly>}
         {page === "team" && <StaffOnly staff={staff}><Team key={`${staff.session.role}-${staff.session.employeeId}`} viewer={staff.viewer} access={access} /></StaffOnly>}
         {page === "enquiries" && <StaffOnly staff={staff}><Enquiries local={localEnquiries} setLocal={setLocalEnquiries} /></StaffOnly>}

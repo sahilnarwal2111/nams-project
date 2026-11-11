@@ -45,6 +45,49 @@ export function sortTasks(tasks, mode) {
   return sorted;
 }
 
+// YYYY-MM-DD for the day n days before a YYYY-MM-DD day.
+export function daysBefore(day, n) {
+  const date = new Date(`${day}T00:00:00Z`);
+  date.setUTCDate(date.getUTCDate() - n);
+  return date.toISOString().slice(0, 10);
+}
+
+// Finished work stays on the board for a week: today and the six days before.
+// Older work, and work finished before completion dates were recorded, is
+// only in the completed list.
+export const RECENT_DAYS = 7;
+export function isRecentlyCompleted(task, today) {
+  return task.status === "done" && Boolean(task.completedAt) && task.completedAt > daysBefore(today, RECENT_DAYS);
+}
+
+// What the board shows: all open work plus recently finished work.
+export function boardTasks(tasks, today) {
+  return tasks.filter((task) => task.status !== "done" || isRecentlyCompleted(task, today));
+}
+
+// Every finished task, newest first. Work with no recorded date goes last.
+export function completedTasks(tasks) {
+  return tasks
+    .filter((task) => task.status === "done")
+    .sort((a, b) => {
+      if (!a.completedAt !== !b.completedAt) return a.completedAt ? -1 : 1;
+      return (b.completedAt ?? "").localeCompare(a.completedAt ?? "") || byId(b, a);
+    });
+}
+
+// The completed list in month groups, in order: [{ key, tasks }]. key is
+// "YYYY-MM", or null for work with no recorded date.
+export function completedByMonth(tasks) {
+  const groups = [];
+  for (const task of completedTasks(tasks)) {
+    const key = task.completedAt ? task.completedAt.slice(0, 7) : null;
+    const last = groups[groups.length - 1];
+    if (last && last.key === key) last.tasks.push(task);
+    else groups.push({ key, tasks: [task] });
+  }
+  return groups;
+}
+
 // How much work each person has: { [employeeId]: { open, done } }.
 export function workCounts(tasks) {
   const counts = {};
