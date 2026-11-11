@@ -50,7 +50,8 @@ Each window carries `reporting_day`, `start_utc`, and `end_utc`. UTC boundary st
 Top-level `reporting_day`, `day_start_utc`, and `day_end_utc` refer only to `last_complete_day`.
 Counts and INR amounts have no denominator. Fractions use the denominators below and range from 0 to 1 with valid source data.
 Zero denominators return SQL `NULL`, never zero percent. Empty cohorts return zero counts and amounts, subject to cutover limitations below.
-Report fractions with both counts. Label denominators below 10 as **small sample**; this threshold is a proposal, not an approved policy.
+Report fractions with their numerator and denominator. For count-based fractions, label denominators below 10 as **small sample**.
+This threshold is a proposal, not an approved policy. For the balance fraction, show amounts and positive-balance client count.
 
 ## Current-stock candidates
 
