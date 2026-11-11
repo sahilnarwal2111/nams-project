@@ -1,0 +1,30 @@
+# Render Blueprint for the API. The database is on Neon, not Render:
+# Render's free Postgres expires after 30 days.
+#
+# Secrets are not stored here. DATABASE_URL and CORS_ORIGINS are entered in the
+# Render dashboard when the Blueprint is first applied (sync: false).
+services:
+  - type: web
+    name: nk-consultancy-api
+    runtime: node
+    plan: free
+    region: singapore
+    branch: main
+    # --include=dev: the Prisma CLI is a devDependency and the build needs it.
+    buildCommand: npm ci --include=dev && npm run build:backend
+    startCommand: npm run start:backend
+    healthCheckPath: /api/health
+    # Redeploy only when the API or its dependencies change, not for frontend work.
+    buildFilter:
+      paths:
+        - apps/backend/**
+        - package.json
+        - package-lock.json
+        - render.yaml
+    envVars:
+      - key: NODE_VERSION
+        value: "24"
+      - key: DATABASE_URL # Neon connection string (direct, not pooled)
+        sync: false
+      - key: CORS_ORIGINS # comma-separated frontend origins, * wildcards allowed
+        sync: false
