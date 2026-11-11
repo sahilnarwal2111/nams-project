@@ -1,22 +1,29 @@
 import { prisma } from "../lib/prisma.js";
 import { parseDate } from "../lib/dates.js";
-import { inTransaction, logActivity, quoted, rupees } from "../lib/activity.js";
+import { inTransaction, lockAndFind, logActivity, quoted, rupees } from "../lib/activity.js";
 import { HttpError, sendHttpError } from "../lib/httpError.js";
+import { presentTask, receivedFor } from "../lib/billing.js";
+
+// Payments are recorded against a task (a ticket). All of this is admin only;
+// the router sees to that.
+
+const notFound = (id) => new HttpError(404, `Task ${id} not found`);
 
 export async function listPayments(req, res) {
   const { id } = req.params;
-  const client = await prisma.client.findUnique({ where: { id }, select: { id: true } });
-  if (!client) return res.status(404).json({ error: `Client ${id} not found` });
+  const task = await prisma.task.findUnique({ where: { id }, select: { id: true } });
+  if (!task) return res.status(404).json({ error: `Task ${id} not found` });
 
   const payments = await prisma.payment.findMany({
-    where: { clientId: id },
+    where: { taskId: id },
     orderBy: [{ receivedAt: "desc" }, { id: "desc" }],
   });
   res.json(payments);
 }
 
-// Records money received: stores the payment and lowers the client's dues in
-// one transaction. A client who has cleared everything becomes "paid".
+// Records money received for a task. The task is locked while the balance is
+// checked, so two payments arriving together cannot add up to more than the
+// amount to charge. A part payment leaves the task "part"; the rest "paid".
 export async function recordPayment(req, res) {
   const { id } = req.params;
   const body = req.body ?? {};
@@ -38,41 +45,69 @@ export async function recordPayment(req, res) {
 
   try {
     const result = await inTransaction(async (tx) => {
-      // The condition and the decrement are one statement, so two payments
-      // arriving together cannot take the balance below zero.
-      const { count } = await tx.client.updateMany({
-        where: { id, due: { gte: amount } },
-        data: { due: { decrement: amount } },
-      });
-      if (count === 0) {
-        const existing = await tx.client.findUnique({ where: { id }, select: { due: true } });
-        if (!existing) throw new HttpError(404, `Client ${id} not found`);
-        throw new HttpError(400, `amount is more than the outstanding ${existing.due}`);
-      }
-      let client = await tx.client.findUnique({ where: { id } });
-      const statusBefore = client.status;
-      if (client.due === 0 && client.status !== "paid") {
-        client = await tx.client.update({ where: { id }, data: { status: "paid" } });
-      }
-      const payment = await tx.payment.create({ data: { clientId: id, amount, note, receivedAt } });
-      // Filed under the client, so a client's history includes its payments.
+      const task = await lockAndFind(tx, "task", id);
+      if (!task) throw notFound(id);
+      if (task.fee === null) throw new HttpError(400, `Set the amount to charge for ${id} before recording a payment`);
+      const before = await receivedFor(tx, id);
+      const due = task.fee - before;
+      if (amount > due) throw new HttpError(400, `amount is more than the outstanding ${due}`);
+
+      const payment = await tx.payment.create({ data: { taskId: id, amount, note, receivedAt } });
+      const left = due - amount;
       await logActivity(tx, req, {
         action: "payment.recorded",
-        entityType: "client",
+        entityType: "task",
         entityId: id,
-        summary: `Recorded ${rupees(amount)} received from ${quoted(client.name)}; ${rupees(client.due)} still due`,
+        summary:
+          `Recorded ${rupees(amount)} received for ${id} ${quoted(task.title)}; ` +
+          (left === 0 ? "now paid in full" : `${rupees(left)} still due`),
         changes: {
           paymentId: { from: null, to: payment.id },
           amount: { from: null, to: amount },
           receivedAt: { from: null, to: payment.receivedAt.toISOString() },
           ...(payment.note ? { note: { from: null, to: payment.note } } : {}),
-          due: { from: client.due + amount, to: client.due },
-          ...(statusBefore !== client.status ? { status: { from: statusBefore, to: client.status } } : {}),
+          received: { from: before, to: before + amount },
         },
       });
-      return { payment, client };
+      return { payment, task: await presentTask(tx, task, req.role) };
     });
     res.status(201).json(result);
+  } catch (err) {
+    sendHttpError(res, err);
+  }
+}
+
+// Takes back a payment recorded by mistake. The payment stays readable in the
+// activity log.
+export async function removePayment(req, res) {
+  const { id, paymentId } = req.params;
+  try {
+    const result = await inTransaction(async (tx) => {
+      const task = await lockAndFind(tx, "task", id);
+      if (!task) throw notFound(id);
+      const payment = /^\d{1,9}$/.test(paymentId)
+        ? await tx.payment.findFirst({ where: { id: Number(paymentId), taskId: id } })
+        : null;
+      if (!payment) throw new HttpError(404, `Payment ${paymentId} not found on ${id}`);
+
+      const before = await receivedFor(tx, id);
+      await tx.payment.delete({ where: { id: payment.id } });
+      await logActivity(tx, req, {
+        action: "payment.removed",
+        entityType: "task",
+        entityId: id,
+        summary: `Removed the payment of ${rupees(payment.amount)} from ${id} ${quoted(task.title)}; ${rupees(task.fee - before + payment.amount)} now due`,
+        changes: {
+          paymentId: { from: payment.id, to: null },
+          amount: { from: payment.amount, to: null },
+          receivedAt: { from: payment.receivedAt.toISOString(), to: null },
+          ...(payment.note ? { note: { from: payment.note, to: null } } : {}),
+          received: { from: before, to: before - payment.amount },
+        },
+      });
+      return { task: await presentTask(tx, task, req.role) };
+    });
+    res.json(result);
   } catch (err) {
     sendHttpError(res, err);
   }

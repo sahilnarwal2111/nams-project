@@ -16,7 +16,7 @@ import { authEnabled } from "./auth.js";
 // Room for a slow first connection after the database has been asleep.
 export const inTransaction = (fn) => prisma.$transaction(fn, { maxWait: 10_000, timeout: 20_000 });
 
-const TABLES = { task: "Task", client: "Client", enquiry: "Enquiry", employee: "Employee" };
+const TABLES = { task: "Task", enquiry: "Enquiry", employee: "Employee" };
 
 // Reads a record and holds it until the transaction ends, so the "before" in
 // the log is exactly what the change replaced, even when two people save at
