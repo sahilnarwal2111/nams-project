@@ -63,16 +63,44 @@ export async function createTask(req, res) {
   throw new Error("Could not allocate a task id");
 }
 
-export async function updateTaskStatus(req, res) {
-  const { id } = req.params;
-  const { status } = req.body;
+const EDITABLE_FIELDS = ["title", "client", "assigneeId", "priority", "status"];
 
-  if (!VALID_STATUSES.includes(status)) {
+// PATCH: only the fields sent are changed. `id`, `updatedAt` and any other
+// unknown keys are ignored.
+export async function updateTask(req, res) {
+  const { id } = req.params;
+  const body = req.body ?? {};
+
+  const data = {};
+  for (const field of EDITABLE_FIELDS) {
+    if (Object.hasOwn(body, field)) data[field] = body[field];
+  }
+  if (Object.keys(data).length === 0) {
+    return res.status(400).json({ error: `body must include at least one of: ${EDITABLE_FIELDS.join(", ")}` });
+  }
+
+  for (const field of ["title", "client", "assigneeId"]) {
+    if (!(field in data)) continue;
+    if (typeof data[field] !== "string" || data[field].trim() === "") {
+      return res.status(400).json({ error: `${field} must be a non-empty string` });
+    }
+  }
+  if ("title" in data) data.title = data.title.trim();
+  if ("client" in data) data.client = data.client.trim();
+
+  if ("priority" in data && !VALID_PRIORITIES.includes(data.priority)) {
+    return res.status(400).json({ error: `priority must be one of: ${VALID_PRIORITIES.join(", ")}` });
+  }
+  if ("status" in data && !VALID_STATUSES.includes(data.status)) {
     return res.status(400).json({ error: `status must be one of: ${VALID_STATUSES.join(", ")}` });
+  }
+  if ("assigneeId" in data) {
+    const employee = await prisma.employee.findUnique({ where: { id: data.assigneeId } });
+    if (!employee) return res.status(400).json({ error: `assigneeId ${data.assigneeId} is not an existing employee` });
   }
 
   try {
-    const task = await prisma.task.update({ where: { id }, data: { status } });
+    const task = await prisma.task.update({ where: { id }, data });
     res.json(task);
   } catch (err) {
     if (err.code === "P2025") return res.status(404).json({ error: `Task ${id} not found` });
