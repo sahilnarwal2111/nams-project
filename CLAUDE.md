@@ -67,7 +67,7 @@ apps/backend/
   test/api.test.js         node:test suite hitting the real app over HTTP
 ```
 
-Endpoints today: `GET /api/health`, `GET /api/employees`, `GET /api/tasks`, `PATCH /api/tasks/:id` (body `{ status }`), `GET /api/clients`, `PATCH /api/clients/:id` (logs a call: sets `lastCall` to now).
+Endpoints today: `GET /api/health`, `GET /api/employees`, `GET /api/tasks`, `GET /api/tasks/:id` (404 if unknown), `PATCH /api/tasks/:id` (body `{ status }`), `GET /api/clients`, `PATCH /api/clients/:id` (logs a call: sets `lastCall` to now).
 
 Design decisions to preserve:
 
