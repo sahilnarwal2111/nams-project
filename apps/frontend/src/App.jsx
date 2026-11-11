@@ -5,14 +5,15 @@ import {
   createClient, updateClient, deleteClient, recordPayment, fetchPayments,
   clientToApi, clientFormError, paymentError, paymentPatchBody, parseRupees, nextLocalClientId,
   fetchSession, login, logout, onAuthLost,
-  daysAgo, paymentPending, enquiryError, sendEnquiry, fetchEnquiries, updateEnquiryStatus, deleteEnquiry,
+  daysAgo, paymentPending, enquiryError,
+  canEditTask, signInChoices, defaultSignInChoice, personalPasswordError, setEmployeePassword, clearEmployeePassword, sendEnquiry, fetchEnquiries, updateEnquiryStatus, deleteEnquiry,
 } from "./api.js";
 import { filterTasks, sortTasks, isOverdue, SORT_MODES } from "./board.js";
 import {
   Ruler, Route, Building2, Droplets, Plane, Waves,
   Menu, X, ChevronRight, Clock, PhoneCall,
   Mail, Phone, MapPin, ArrowLeft,
-  ArrowRight, Filter, ChevronDown, Plus, Pencil, Trash2, CalendarDays, IndianRupee, Lock, LogOut, History, Search, CircleCheck, Send, MessageSquare
+  ArrowRight, Filter, ChevronDown, Plus, Pencil, Trash2, CalendarDays, IndianRupee, Lock, LogOut, History, Search, CircleCheck, Send, MessageSquare, KeyRound, UserRound
 } from "lucide-react";
 
 /* ---------------------------------------------------------------
@@ -136,13 +137,14 @@ const fmtDate = (s) => new Date(s + "T00:00:00").toLocaleDateString("en-IN", { d
 /* ---------------------------------------------------------------
    NAVIGATION BAR
 ------------------------------------------------------------------*/
-function TopNav({ page, setPage, onSignOut }) {
+function TopNav({ page, setPage, onSignOut, userName, showTeam }) {
   const [open, setOpen] = useState(false);
   const items = [
     { id: "home", label: "Overview" },
     { id: "work", label: "Work Board" },
     { id: "payments", label: "Receivables" },
     { id: "enquiries", label: "Enquiries" },
+    ...(showTeam ? [{ id: "team", label: "Team" }] : []),
   ];
 
   return (
@@ -183,6 +185,11 @@ function TopNav({ page, setPage, onSignOut }) {
               <LogOut size={13} /> Sign out
             </button>
           )}
+          {onSignOut && userName && (
+            <span data-testid="signed-in-as" style={{ color: C.blueLight }} className="f-body text-xs ml-2 flex items-center gap-1">
+              <UserRound size={13} /> {userName}
+            </span>
+          )}
         </nav>
 
         {/* Mobile Toggle */}
@@ -221,7 +228,7 @@ function TopNav({ page, setPage, onSignOut }) {
               style={{ color: C.blueLight }}
               className="f-body text-sm px-4 py-3 w-full text-left font-medium flex items-center gap-2"
             >
-              <LogOut size={15} /> Sign out
+              <LogOut size={15} /> Sign out{userName ? ` (${userName})` : ""}
             </button>
           )}
         </div>
@@ -436,7 +443,8 @@ function Landing({ setPage, onEnquiry }) {
 /* ---------------------------------------------------------------
    WORK BOARD
 ------------------------------------------------------------------*/
-function TaskCard({ task, employees, onMove, onEdit, busy, today }) {
+// canEdit decides whether the edit and move buttons are shown.
+function TaskCard({ task, employees, onMove, onEdit, busy, today, canEdit }) {
   const emp = employees.find((e) => e.id === task.assignee);
   const pr = PRIORITY_META[task.priority];
   const order = ["todo", "inprogress", "done"];
@@ -450,14 +458,16 @@ function TaskCard({ task, employees, onMove, onEdit, busy, today }) {
           <span style={{ background: pr.bg, color: pr.color }} className="f-mono text-[10px] font-semibold px-2 py-0.5 rounded">
             {pr.label}
           </span>
-          <button
-            onClick={() => onEdit(task)}
-            aria-label={`Edit ${task.id}`}
-            style={{ color: C.steel }}
-            className="p-1 rounded hover:bg-stone-100 active:scale-95 transition-transform"
-          >
-            <Pencil size={12} />
-          </button>
+          {canEdit && (
+            <button
+              onClick={() => onEdit(task)}
+              aria-label={`Edit ${task.id}`}
+              style={{ color: C.steel }}
+              className="p-1 rounded hover:bg-stone-100 active:scale-95 transition-transform"
+            >
+              <Pencil size={12} />
+            </button>
+          )}
         </div>
       </div>
       <h4 style={{ color: C.ink }} className="f-body text-sm font-semibold leading-snug mb-1">{task.title}</h4>
@@ -499,7 +509,7 @@ function TaskCard({ task, employees, onMove, onEdit, busy, today }) {
         </div>
 
         <div className="flex items-center gap-1">
-          {idx > 0 && (
+          {canEdit && idx > 0 && (
             <button
               onClick={() => onMove(task.id, order[idx - 1])}
               disabled={busy}
@@ -509,7 +519,7 @@ function TaskCard({ task, employees, onMove, onEdit, busy, today }) {
               <ArrowLeft size={13} />
             </button>
           )}
-          {idx < order.length - 1 && (
+          {canEdit && idx < order.length - 1 && (
             <button
               onClick={() => onMove(task.id, order[idx + 1])}
               disabled={busy}
@@ -637,7 +647,8 @@ function Field({ label, required, children }) {
 
 // Create (task = null) or edit a work item. onSave and onDelete return promises;
 // a rejection is shown in the form and the form stays open.
-function WorkForm({ task, employees, onSave, onDelete, onClose }) {
+// Only an admin may reassign or delete work.
+function WorkForm({ task, employees, onSave, onDelete, onClose, isAdmin = true }) {
   const [form, setForm] = useState(() => ({
     ...EMPTY_WORK,
     assignee: employees[0]?.id ?? "",
@@ -672,7 +683,7 @@ function WorkForm({ task, employees, onSave, onDelete, onClose }) {
       onSubmit={submit}
       footer={<>
         <div>
-          {task && <DeleteControl question="Delete this work permanently?" busy={busy} onConfirm={() => run(() => onDelete(task.id))} />}
+          {task && isAdmin && <DeleteControl question="Delete this work permanently?" busy={busy} onConfirm={() => run(() => onDelete(task.id))} />}
         </div>
         <DialogButtons busy={busy} onClose={onClose} saveLabel={task ? "Save Changes" : "Add Work"} />
       </>}
@@ -733,7 +744,7 @@ function WorkForm({ task, employees, onSave, onDelete, onClose }) {
           </Field>
           <div className="sm:col-span-2">
             <Field label="Assign to" required>
-              <select name="assignee" value={form.assignee} onChange={set("assignee")} required style={line} className={INPUT_CLASS}>
+              <select name="assignee" value={form.assignee} onChange={set("assignee")} required disabled={!isAdmin} title={isAdmin ? undefined : "Only an admin can reassign work"} style={line} className={`${INPUT_CLASS} disabled:bg-stone-100 disabled:text-stone-500`}>
                 {employees.map((e) => <option key={e.id} value={e.id}>{e.name} ({e.role})</option>)}
               </select>
             </Field>
@@ -745,7 +756,10 @@ function WorkForm({ task, employees, onSave, onDelete, onClose }) {
   );
 }
 
-function WorkBoard() {
+// viewer: { isAdmin, employeeId }. An admin creates, edits, moves and deletes
+// any work; a person signed in by name edits and moves only their own; the
+// office sign-in only looks. The API enforces the same rules.
+function WorkBoard({ viewer = { isAdmin: true, employeeId: null } }) {
   const useApi = hasApi();
   const [tasks, setTasks] = useState(useApi ? [] : INITIAL_TASKS);
   const [employees, setEmployees] = useState(useApi ? [] : EMPLOYEES);
@@ -753,7 +767,8 @@ function WorkBoard() {
   const [attempt, setAttempt] = useState(0);
   const [saveError, setSaveError] = useState(null);
   const [saving, setSaving] = useState(() => new Set());
-  const [filter, setFilter] = useState("all");
+  // A person starts on their own work.
+  const [filter, setFilter] = useState(viewer.employeeId ?? "all");
   // null = form closed, "new" = creating, a task = editing it.
   const [editing, setEditing] = useState(null);
   const [query, setQuery] = useState("");
@@ -812,7 +827,7 @@ function WorkBoard() {
   // saved could otherwise roll back to a status the server never had.
   const moveTask = (id, status) => {
     const task = tasks.find((t) => t.id === id);
-    if (!task || task.status === status || saving.has(id)) return;
+    if (!task || task.status === status || saving.has(id) || !canEditTask(task, viewer)) return;
     const prevStatus = task.status;
     setSaveError(null);
     setStatus(id, status);
@@ -844,7 +859,14 @@ function WorkBoard() {
           <div>
             <div style={{ color: C.orangeDeep }} className="f-mono text-xs font-semibold tracking-wider uppercase mb-1">Task Operations</div>
             <h1 style={{ color: C.ink }} className="f-display text-2xl sm:text-3xl font-bold">Project Work Board</h1>
-            {load.state === "ready" && (
+            {!viewer.isAdmin && (
+              <p data-testid="board-access" style={{ color: C.steel }} className="f-body text-sm mt-1">
+                {viewer.employeeId
+                  ? "You can update and move the work assigned to you. An admin adds and assigns new work."
+                  : "View only. Sign in with your own name to update your work."}
+              </p>
+            )}
+            {load.state === "ready" && viewer.isAdmin && (
               <button
                 onClick={() => setEditing("new")}
                 style={{ background: C.orange, color: C.paper }}
@@ -974,7 +996,7 @@ function WorkBoard() {
 
                 <div className="min-h-[250px]">
                   {colTasks.map((t) => (
-                    <TaskCard key={t.id} task={t} employees={employees} onMove={moveTask} onEdit={setEditing} busy={saving.has(t.id)} today={today} />
+                    <TaskCard key={t.id} task={t} employees={employees} onMove={moveTask} onEdit={setEditing} busy={saving.has(t.id)} today={today} canEdit={canEditTask(t, viewer)} />
                   ))}
                   {colTasks.length === 0 && (
                     <div style={{ borderColor: C.line, color: C.steel }} className="border border-dashed rounded-md p-8 text-center f-body text-xs">
@@ -997,6 +1019,7 @@ function WorkBoard() {
           onSave={saveWork}
           onDelete={removeWork}
           onClose={() => setEditing(null)}
+          isAdmin={viewer.isAdmin}
         />
       )}
     </div>
@@ -1693,14 +1716,130 @@ function Enquiries({ local, setLocal }) {
 }
 
 /* ---------------------------------------------------------------
+   TEAM (admin: personal passwords)
+------------------------------------------------------------------*/
+function TeamMember({ employee, busy, onSet, onClear }) {
+  const [mode, setMode] = useState("idle"); // idle | setting | removing
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState(null);
+  const save = (e) => {
+    e.preventDefault();
+    const problem = personalPasswordError(password);
+    if (problem) return setError(problem);
+    setError(null);
+    onSet(employee.id, password)
+      .then(() => { setMode("idle"); setPassword(""); })
+      .catch((err) => setError(err.message));
+  };
+  const remove = () => onClear(employee.id).then(() => setMode("idle")).catch((err) => setError(err.message));
+  const smallBtn = "f-body text-xs font-semibold px-3 py-2 rounded disabled:opacity-50";
+
+  return (
+    <div data-testid="team-member" style={{ background: C.card, borderColor: C.line }} className="border rounded-md p-4 shadow-sm">
+      <div className="flex items-center gap-3 flex-wrap">
+        <div style={{ background: C.navy, color: C.paper }} className="w-9 h-9 rounded-full flex items-center justify-center f-mono text-xs font-bold shrink-0">{employee.initials}</div>
+        <div className="min-w-0 flex-1">
+          <div style={{ color: C.ink }} className="f-body text-sm font-semibold">{employee.name}</div>
+          <div style={{ color: C.steel }} className="f-body text-xs">{employee.role}</div>
+        </div>
+        <span data-testid="password-state" style={employee.hasPassword ? { background: "#EEF3ED", color: C.green } : { background: "#F1EFEA", color: C.steel }} className="f-mono text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded">
+          {employee.hasPassword ? "Can sign in" : "No password"}
+        </span>
+        {mode === "idle" && (
+          <div className="flex items-center gap-2">
+            <button disabled={busy} onClick={() => { setMode("setting"); setError(null); }} style={{ background: C.navy, color: C.paper }} className={smallBtn}>
+              {employee.hasPassword ? "Change password" : "Set password"}
+            </button>
+            {employee.hasPassword && (
+              <button disabled={busy} onClick={() => { setMode("removing"); setError(null); }} style={{ borderColor: C.line, color: C.ink }} className={`${smallBtn} border bg-white`}>Remove</button>
+            )}
+          </div>
+        )}
+      </div>
+      {mode === "setting" && (
+        <form onSubmit={save} aria-label={`Password for ${employee.name}`} className="mt-3 flex flex-col sm:flex-row gap-2">
+          <input name="password" type="text" autoComplete="off" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="New password, at least 6 characters" style={{ borderColor: C.line, color: C.ink }} className={INPUT_CLASS} autoFocus />
+          <div className="flex gap-2 shrink-0">
+            <button type="submit" disabled={busy} style={{ background: C.orange, color: "#FFFFFF" }} className={smallBtn}>{busy ? "Saving…" : "Save"}</button>
+            <button type="button" onClick={() => { setMode("idle"); setPassword(""); setError(null); }} style={{ color: C.steel }} className={smallBtn}>Cancel</button>
+          </div>
+        </form>
+      )}
+      {mode === "removing" && (
+        <div className="mt-3 flex items-center gap-2 flex-wrap">
+          <span style={{ color: C.ink }} className="f-body text-sm">Remove {employee.name}'s password? They will be signed out.</span>
+          <button disabled={busy} onClick={remove} style={{ background: C.orangeDeep, color: "#FFFFFF" }} className={smallBtn}>Yes, remove</button>
+          <button onClick={() => setMode("idle")} style={{ color: C.steel }} className={smallBtn}>Keep</button>
+        </div>
+      )}
+      {error && <div role="alert" style={{ color: C.orangeDeep }} className="f-body text-xs mt-2">{error}</div>}
+    </div>
+  );
+}
+
+function Team() {
+  const [employees, setEmployees] = useState([]);
+  const [load, setLoad] = useState({ state: "loading" });
+  const [attempt, setAttempt] = useState(0);
+  const [saving, setSaving] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchEmployees()
+      .then((list) => { if (!cancelled) { setEmployees(list); setLoad({ state: "ready" }); } })
+      .catch((err) => { if (!cancelled) setLoad({ state: "error", message: err.message }); });
+    return () => { cancelled = true; };
+  }, [attempt]);
+
+  const mark = (id, hasPassword) => setEmployees((prev) => prev.map((e) => (e.id === id ? { ...e, hasPassword } : e)));
+  const busyWhile = async (id, work) => {
+    setSaving(id);
+    try { await work(); } finally { setSaving(null); }
+  };
+  const onSet = (id, password) => busyWhile(id, async () => { await setEmployeePassword(id, password); mark(id, true); });
+  const onClear = (id) => busyWhile(id, async () => { await clearEmployeePassword(id); mark(id, false); });
+
+  return (
+    <div style={{ background: C.paper }} className="w-full min-h-[calc(100vh-4rem)]">
+      <div className="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8 py-8 sm:py-12">
+        <div style={{ color: C.orangeDeep }} className="f-mono text-xs font-semibold tracking-wider uppercase mb-1">Admin</div>
+        <h1 style={{ color: C.ink }} className="f-display text-2xl sm:text-3xl font-bold flex items-center gap-2"><KeyRound size={24} /> Team sign-in</h1>
+        <p style={{ color: C.steel }} className="f-body text-sm mt-1 mb-6">
+          Give each person their own password. They pick their name on the sign-in screen and can then update and move the work assigned to them. Tell them the password in person.
+        </p>
+        {load.state === "loading" && <div style={{ borderColor: C.line, color: C.steel, background: C.card }} className="border rounded-md p-10 text-center f-body text-sm">Loading team…</div>}
+        {load.state === "error" && (
+          <div style={{ borderColor: C.orangeDeep, background: "#FDF0EA" }} className="border rounded-md p-6 text-center">
+            <p style={{ color: C.orangeDeep }} className="f-body text-sm mb-3">Could not load the team. {load.message}</p>
+            <button onClick={() => { setLoad({ state: "loading" }); setAttempt((a) => a + 1); }} style={{ background: C.navy, color: C.paper }} className="f-body text-xs font-semibold px-4 py-2 rounded shadow-sm hover:opacity-90">Retry</button>
+          </div>
+        )}
+        {load.state === "ready" && (
+          <div className="space-y-3">
+            {employees.map((e) => <TeamMember key={e.id} employee={e} busy={saving === e.id} onSet={onSet} onClear={onClear} />)}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------------
    STAFF SIGN-IN
 ------------------------------------------------------------------*/
 // Whether the staff pages may be shown: "open" (no API, or the server has no
 // password set), "checking", "login", "signedIn" or "error".
+const SIGNED_OUT = { role: "staff", employeeId: null, name: null };
+
 function useStaffSession() {
   const useApi = hasApi();
-  // role is "admin" or "staff"; without an API there is no sign-in and everything shows.
-  const [session, setSession] = useState(useApi ? { state: "checking", role: "staff" } : { state: "open", role: "admin" });
+  const signedOut = SIGNED_OUT;
+  // role is "admin" or "staff"; employeeId and name are set for a personal
+  // sign-in; people are offered on the sign-in screen. Without an API there is
+  // no sign-in and everything shows.
+  const [session, setSession] = useState(
+    useApi ? { state: "checking", ...signedOut, people: [] } : { state: "open", role: "admin", employeeId: null, name: null, people: [] }
+  );
   const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
@@ -1708,21 +1847,37 @@ function useStaffSession() {
     let cancelled = false;
     fetchSession()
       .then((found) => { if (!cancelled) setSession(found); })
-      .catch((err) => { if (!cancelled) setSession({ state: "error", role: "staff", message: err.message }); });
-    const stopListening = onAuthLost(() => setSession({ state: "login", role: "staff" }));
+      .catch((err) => { if (!cancelled) setSession({ state: "error", ...signedOut, people: [], message: err.message }); });
+    // Signed out by the server: ask again, so the sign-in screen has the
+    // current list of people.
+    const stopListening = onAuthLost(() => {
+      setSession((prev) => ({ ...prev, state: "checking", ...signedOut }));
+      setAttempt((a) => a + 1);
+    });
     return () => { cancelled = true; stopListening(); };
-  }, [useApi, attempt]);
+  }, [useApi, attempt, signedOut]);
 
   return {
     session,
     isAdmin: session.role === "admin",
-    signIn: async (password) => { const role = await login(password); setSession({ state: "signedIn", role }); },
-    signOut: () => { logout(); setSession({ state: "login", role: "staff" }); },
-    retry: () => { setSession({ state: "checking", role: "staff" }); setAttempt((a) => a + 1); },
+    viewer: { isAdmin: session.role === "admin", employeeId: session.employeeId },
+    signIn: async (password, as) => { await login(password, as); setSession(await fetchSession()); },
+    // Reloads the session so the sign-in screen lists whoever was given a
+    // password since this browser last checked.
+    signOut: () => {
+      logout();
+      setSession((prev) => ({ ...prev, state: "checking", ...signedOut }));
+      setAttempt((a) => a + 1);
+    },
+    retry: () => { setSession((prev) => ({ ...prev, state: "checking" })); setAttempt((a) => a + 1); },
   };
 }
 
-function SignIn({ onSignIn }) {
+const SIGN_IN_AS_KEY = "nk.signInAs";
+const rememberedChoice = () => { try { return localStorage.getItem(SIGN_IN_AS_KEY); } catch { return null; } };
+
+function SignIn({ people, onSignIn }) {
+  const [as, setAs] = useState(() => defaultSignInChoice(people, rememberedChoice()));
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
@@ -1731,7 +1886,8 @@ function SignIn({ onSignIn }) {
     e.preventDefault();
     setBusy(true);
     setError(null);
-    onSignIn(password).catch((err) => { setError(err.message); setBusy(false); });
+    try { localStorage.setItem(SIGN_IN_AS_KEY, as); } catch { /* storage blocked */ }
+    onSignIn(password, as).catch((err) => { setError(err.message); setBusy(false); });
   };
 
   return (
@@ -1742,6 +1898,13 @@ function SignIn({ onSignIn }) {
       <div style={{ color: C.orangeDeep }} className="f-mono text-xs font-semibold tracking-wider uppercase mb-1">Staff Only</div>
       <h1 style={{ color: C.ink }} className="f-display text-xl font-bold mb-1">Sign in to continue</h1>
       <p style={{ color: C.steel }} className="f-body text-sm mb-5">The work board and receivables are for NK Consultancy staff.</p>
+      <div className="mb-3">
+        <Field label="Sign in as" required>
+          <select name="as" value={as} onChange={(e) => setAs(e.target.value)} style={{ borderColor: C.line, color: C.ink }} className={INPUT_CLASS}>
+            {signInChoices(people).map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
+          </select>
+        </Field>
+      </div>
       <Field label="Password" required>
         <input
           name="password" type="password" autoComplete="current-password" value={password}
@@ -1761,6 +1924,14 @@ function SignIn({ onSignIn }) {
   );
 }
 
+function AdminOnlyNotice() {
+  return (
+    <div style={{ background: C.paper }} className="min-h-[calc(100vh-4rem)] py-16 px-4 flex justify-center">
+      <p style={{ color: C.steel }} className="f-body text-sm">This page is for the admin.</p>
+    </div>
+  );
+}
+
 // Shows its children only when the staff session allows it.
 function StaffOnly({ staff, children }) {
   const { session, signIn, retry } = staff;
@@ -1768,7 +1939,7 @@ function StaffOnly({ staff, children }) {
 
   return (
     <div style={{ background: C.paper }} className="min-h-[calc(100vh-4rem)] grid-bg py-10 sm:py-16 px-4 flex items-start justify-center">
-      {session.state === "login" && <SignIn onSignIn={signIn} />}
+      {session.state === "login" && <SignIn people={session.people} onSignIn={signIn} />}
       {session.state === "checking" && (
         <div style={{ borderColor: C.line, color: C.steel, background: C.card }} className="w-full max-w-sm border rounded-md p-8 text-center f-body text-sm">
           Checking access…
@@ -1804,11 +1975,18 @@ export default function App() {
   };
   return (
     <div className="f-body w-full min-h-screen antialiased" style={{ background: C.paper }}>
-      <TopNav page={page} setPage={setPage} onSignOut={staff.session.state === "signedIn" ? staff.signOut : null} />
+      <TopNav
+        page={page}
+        setPage={setPage}
+        onSignOut={staff.session.state === "signedIn" ? staff.signOut : null}
+        userName={staff.session.name ?? (staff.session.state === "signedIn" ? (staff.isAdmin ? "Admin" : "Office") : null)}
+        showTeam={hasApi() && staff.isAdmin}
+      />
       <main>
         {page === "home" && <Landing setPage={setPage} onEnquiry={hasApi() ? sendEnquiry : sendLocalEnquiry} />}
-        {page === "work" && <StaffOnly staff={staff}><WorkBoard /></StaffOnly>}
+        {page === "work" && <StaffOnly staff={staff}><WorkBoard key={`${staff.session.role}-${staff.session.employeeId}`} viewer={staff.viewer} /></StaffOnly>}
         {page === "payments" && <StaffOnly staff={staff}><Payments key={staff.session.role} isAdmin={staff.isAdmin} /></StaffOnly>}
+        {page === "team" && <StaffOnly staff={staff}>{staff.isAdmin ? <Team /> : <AdminOnlyNotice />}</StaffOnly>}
         {page === "enquiries" && <StaffOnly staff={staff}><Enquiries local={localEnquiries} setLocal={setLocalEnquiries} /></StaffOnly>}
       </main>
     </div>

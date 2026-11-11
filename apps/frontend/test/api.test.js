@@ -1,6 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  canEditTask,
+  signInChoices,
+  defaultSignInChoice,
+  personalPasswordError,
   sessionRole,
   paymentPending,
   daysAgo,
@@ -377,4 +381,38 @@ test("clientFromApi keeps a client without an amount as it is", () => {
   const c = clientFromApi({ id: "c1", name: "A", status: "overdue", invoiceDate: "2026-05-12T00:00:00.000Z", lastCall: "2026-07-18T10:00:00.000Z" });
   assert.equal("due" in c, false);
   assert.equal(c.invoiceDate, "2026-05-12");
+});
+
+test("canEditTask lets an admin edit anything and a person only their own work", () => {
+  const task = { id: "NK-102", assignee: "e6" };
+  assert.equal(canEditTask(task, { isAdmin: true, employeeId: null }), true);
+  assert.equal(canEditTask(task, { isAdmin: false, employeeId: "e6" }), true);
+  assert.equal(canEditTask(task, { isAdmin: false, employeeId: "e4" }), false);
+  assert.equal(canEditTask(task, { isAdmin: false, employeeId: null }), false, "office sign-in is view only");
+  assert.equal(canEditTask({ id: "x", assignee: undefined }, { isAdmin: false, employeeId: undefined }), false);
+  assert.equal(canEditTask(task, undefined), false);
+});
+
+test("sign-in choices list people first, then office and admin", () => {
+  const people = [{ id: "e4", name: "Rajesh Kumar" }, { id: "e6", name: "Ankit" }];
+  assert.deepEqual(signInChoices(people).map((c) => c.value), ["e4", "e6", "office", "admin"]);
+  assert.deepEqual(signInChoices().map((c) => c.value), ["office", "admin"]);
+  assert.equal(defaultSignInChoice(people), "e4");
+  assert.equal(defaultSignInChoice(people, "e6"), "e6");
+  assert.equal(defaultSignInChoice(people, "office"), "office");
+  assert.equal(defaultSignInChoice(people, "e9"), "e4", "a person who can no longer sign in is not offered");
+  assert.equal(defaultSignInChoice([], null), "office", "before anyone has a password, staff use the office password");
+});
+
+test("personalPasswordError asks for 6 to 200 characters", () => {
+  assert.match(personalPasswordError("12345"), /6/);
+  assert.equal(personalPasswordError("123456"), null);
+  assert.match(personalPasswordError("x".repeat(201)), /200/);
+});
+
+test("employeeFromApi keeps hasPassword only when the API sends it", () => {
+  const base = { id: "e6", name: "Ankit", role: "Survey Lead", initials: "AN" };
+  assert.equal(employeeFromApi({ ...base, hasPassword: true }).hasPassword, true);
+  assert.equal("hasPassword" in employeeFromApi(base), false);
+  assert.equal("passwordHash" in employeeFromApi({ ...base, passwordHash: "scrypt$x$y" }), false);
 });

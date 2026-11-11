@@ -16,6 +16,9 @@ model Employee {
   role     String
   initials String
   tasks    Task[]
+  // Personal sign-in password, set by an admin. "scrypt$<salt>$<hash>", never
+  // returned by the API. null means this person cannot sign in on their own.
+  passwordHash String?
 }
 
 model Task {
