@@ -1,5 +1,6 @@
-// Fetch helpers and API <-> UI conversions for the Work Board.
-// The API speaks `assigneeId`; the UI speaks `assignee`. Convert at this boundary only.
+// Fetch helpers and API <-> UI conversions for the Work Board and Payments.
+// The API speaks `assigneeId` and ISO timestamps; the UI speaks `assignee` and YYYY-MM-DD.
+// Convert at this boundary only.
 
 // Empty/unset means "no API": callers fall back to mock data.
 export const API_URL = (import.meta.env?.VITE_API_URL ?? "").trim().replace(/\/+$/, "");
@@ -23,6 +24,28 @@ export function employeeFromApi(e) {
 
 export function employeesFromApi(list) {
   return list.map(employeeFromApi);
+}
+
+// ISO timestamp -> YYYY-MM-DD (UTC day, matching how the UI computes "today").
+// Already-short dates pass through; unparseable values are returned unchanged.
+export function dateFromApi(value) {
+  if (typeof value !== "string") return value;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? value : d.toISOString().slice(0, 10);
+}
+
+export function clientFromApi(c) {
+  return { ...c, invoiceDate: dateFromApi(c.invoiceDate), lastCall: dateFromApi(c.lastCall) };
+}
+
+export function clientsFromApi(list) {
+  return list.map(clientFromApi);
+}
+
+// Body for PATCH /api/clients/:id when logging a reminder: empty, so the API sets lastCall to now.
+export function logCallPatchBody() {
+  return {};
 }
 
 // Body for PATCH /api/tasks/:id when moving a card.
@@ -63,6 +86,18 @@ export async function fetchEmployees() {
 
 export async function fetchTasks() {
   return tasksFromApi(await request("/api/tasks"));
+}
+
+export async function fetchClients() {
+  return clientsFromApi(await request("/api/clients"));
+}
+
+export async function logClientCall(id) {
+  const updated = await request(`/api/clients/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify(logCallPatchBody()),
+  });
+  return clientFromApi(updated);
 }
 
 export async function updateTaskStatus(id, status) {

@@ -9,7 +9,7 @@ Website and internal tools for a civil-engineering consultancy ("NK Consultancy"
 - `apps/frontend` — Vite + React 19 single-page site (marketing landing page, a Work Board kanban, and a Payments receivables tracker). Deployed on Vercel from `main`.
 - `apps/backend` — Express 5 + Prisma API over Postgres 16. Not deployed anywhere yet.
 
-**Current state:** the Work Board uses the API (tasks, employees, saving status moves) when `VITE_API_URL` is set, and falls back to the mock data in `App.jsx` when it is not (as on Vercel today). The landing page team section and the Payments page still use mock data and do not call the API yet.
+**Current state:** the Work Board (tasks, employees, saving status moves) and the Payments page (clients, saving logged reminders) use the API when `VITE_API_URL` is set, and fall back to the mock data in `App.jsx` when it is not (as on Vercel today). The landing page team section still uses mock data and does not call the API yet.
 
 ## Commands (run from the repo root)
 
@@ -43,9 +43,11 @@ Node 24 on the host; no Docker required. The backend needs a Postgres 16 databas
 
 ## Frontend architecture
 
-API access lives in `apps/frontend/src/api.js`: `hasApi()` (true when `import.meta.env.VITE_API_URL` is set; see `apps/frontend/.env.example`), `fetchEmployees`, `fetchTasks`, `updateTaskStatus`, and small pure converters (`taskFromApi`: `assigneeId` → `assignee`, etc.). Non-2xx responses throw an `Error` with a readable message. The converters are tested in `apps/frontend/test/api.test.js` with `node:test`. Keep conversions pure and in `api.js`.
+API access lives in `apps/frontend/src/api.js`: `hasApi()` (true when `import.meta.env.VITE_API_URL` is set; see `apps/frontend/.env.example`), `fetchEmployees`, `fetchTasks`, `updateTaskStatus`, `fetchClients`, `logClientCall`, and small pure converters (`taskFromApi`: `assigneeId` → `assignee`; `clientFromApi`: ISO `invoiceDate`/`lastCall` → `YYYY-MM-DD` via `dateFromApi`, etc.). Non-2xx responses throw an `Error` with a readable message. The converters are tested in `apps/frontend/test/api.test.js` with `node:test`. Keep conversions pure and in `api.js`.
 
 The Work Board in API mode shows a loading state, an error with Retry if the load fails (never a silent mock fallback), moves cards optimistically, and rolls back with an error banner if the `PATCH` fails. Without `VITE_API_URL` it behaves as before on the mock data.
+
+The Payments page follows the same pattern in API mode: loading state, error with Retry (no silent mock fallback), and "Log Reminder" updates `lastCall` immediately, then sends `PATCH /api/clients/:id` with an empty body and adopts the `lastCall` the API returns; on failure it restores the previous value and shows an error banner. The summary tiles and status filter are computed from the loaded clients.
 
 Everything else lives in `apps/frontend/src/App.jsx` (~650 lines), top to bottom:
 
