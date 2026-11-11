@@ -67,7 +67,7 @@ apps/backend/
   test/api.test.js         node:test suite hitting the real app over HTTP
 ```
 
-Endpoints today: `GET /api/health`, `GET /api/employees`, `GET /api/tasks`, `GET /api/tasks/:id` (404 if unknown), `POST /api/tasks` (body `{ title, client, assigneeId, priority, status? }`; `status` defaults to `todo`; id generated as highest `NK-###` + 1; 201 with the task, 400 `{ error }` on missing/empty fields, invalid `priority`/`status`, or unknown `assigneeId`), `PATCH /api/tasks/:id` (body: any of `title`, `client`, `assigneeId`, `priority`, `status`; only the fields sent change; `id`/`updatedAt` are ignored; 400 `{ error }` on an empty body, empty `title`/`client`, invalid `priority`/`status`, or unknown `assigneeId`; 404 if the task is unknown), `GET /api/clients`, `PATCH /api/clients/:id` (logs a call: sets `lastCall` to now).
+Endpoints today: `GET /api/health`, `GET /api/employees`, `GET /api/tasks`, `GET /api/tasks/:id` (404 if unknown), `POST /api/tasks` (body `{ title, client, assigneeId, priority, status? }`; `status` defaults to `todo`; id generated as highest `NK-###` + 1; 201 with the task, 400 `{ error }` on missing/empty fields, invalid `priority`/`status`, or unknown `assigneeId`), `PATCH /api/tasks/:id` (body: any of `title`, `client`, `assigneeId`, `priority`, `status`; only the fields sent change; `id`/`updatedAt` are ignored; 400 `{ error }` on an empty body, empty `title`/`client`, invalid `priority`/`status`, or unknown `assigneeId`; 404 if the task is unknown), `DELETE /api/tasks/:id` (permanently deletes; 204 with no body, 404 `{ error }` if the task is unknown), `GET /api/clients`, `PATCH /api/clients/:id` (logs a call: sets `lastCall` to now).
 
 Design decisions to preserve:
 
