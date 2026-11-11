@@ -393,15 +393,16 @@ test("canEditTask lets an admin edit anything and a person only their own work",
   assert.equal(canEditTask(task, undefined), false);
 });
 
-test("sign-in choices list people first, then office and admin", () => {
+test("sign-in choices start with the shared password, then people", () => {
   const people = [{ id: "e4", name: "Rajesh Kumar" }, { id: "e6", name: "Ankit" }];
-  assert.deepEqual(signInChoices(people).map((c) => c.value), ["e4", "e6", "office", "admin"]);
-  assert.deepEqual(signInChoices().map((c) => c.value), ["office", "admin"]);
-  assert.equal(defaultSignInChoice(people), "e4");
+  assert.deepEqual(signInChoices(people).map((c) => c.value), ["shared", "e4", "e6"]);
+  assert.deepEqual(signInChoices().map((c) => c.value), ["shared"]);
+  assert.equal(defaultSignInChoice(people), "shared", "issue #42: the admin must not have to change the list");
   assert.equal(defaultSignInChoice(people, "e6"), "e6");
-  assert.equal(defaultSignInChoice(people, "office"), "office");
-  assert.equal(defaultSignInChoice(people, "e9"), "e4", "a person who can no longer sign in is not offered");
-  assert.equal(defaultSignInChoice([], null), "office", "before anyone has a password, staff use the office password");
+  assert.equal(defaultSignInChoice(people, "office"), "shared", "old remembered choices fall back to shared");
+  assert.equal(defaultSignInChoice(people, "admin"), "shared");
+  assert.equal(defaultSignInChoice(people, "e9"), "shared", "a person who can no longer sign in is not offered");
+  assert.equal(defaultSignInChoice([], null), "shared");
 });
 
 test("personalPasswordError asks for 6 to 200 characters", () => {

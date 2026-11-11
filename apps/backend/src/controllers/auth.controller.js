@@ -36,8 +36,10 @@ export async function getSession(req, res) {
   });
 }
 
-// { password, as? }. as is "admin", "office" or an employee id. Without it the
-// password is tried as the admin and then the office password.
+// { password, as? }. as is an employee id for a personal sign-in. Anything else
+// ("shared", "admin", "office" or nothing) means a shared password, and the
+// password alone decides between admin and office, so picking the wrong one
+// in the list never refuses a right password.
 export async function login(req, res) {
   if (!authEnabled()) return res.status(400).json({ error: "Login is not switched on for this server." });
 
@@ -50,7 +52,7 @@ export async function login(req, res) {
     res.status(401).json({ error: "Wrong password." });
   };
 
-  if (as !== undefined && as !== "admin" && as !== "office") {
+  if (as !== undefined && as !== "shared" && as !== "admin" && as !== "office") {
     const employee =
       typeof as === "string" && as.length <= 40
         ? await prisma.employee.findUnique({ where: { id: as }, select: { id: true, passwordHash: true } })
@@ -61,7 +63,7 @@ export async function login(req, res) {
   }
 
   const role = roleForPassword(password);
-  if (!role || (as === "admin" && role !== "admin") || (as === "office" && role !== "staff")) return wrong();
+  if (!role) return wrong();
   clearFailedLogins(req.ip);
   res.json(issueToken(role));
 }

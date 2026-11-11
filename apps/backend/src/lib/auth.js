@@ -22,7 +22,9 @@ import { prisma } from "./prisma.js";
 export const TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 const PASSWORD_ENV = { staff: "APP_PASSWORD", admin: "ADMIN_PASSWORD" };
-const passwordFor = (role) => process.env[PASSWORD_ENV[role]] ?? "";
+// Trimmed, so a space or line break pasted into the Render dashboard does not
+// lock everyone out.
+const passwordFor = (role) => (process.env[PASSWORD_ENV[role]] ?? "").trim();
 
 export const authEnabled = () => passwordFor("staff") !== "" || passwordFor("admin") !== "";
 
