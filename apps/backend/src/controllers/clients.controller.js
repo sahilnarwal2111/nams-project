@@ -94,11 +94,50 @@ export async function listClients(req, res) {
   res.json(clients);
 }
 
-export async function logClientCall(req, res) {
+const EDITABLE_FIELDS = ["name", "contact", "phone", "due", "invoiceDate", "lastCall", "status", "notes"];
+
+// Validates the editable fields present in body, applying the same rules as POST.
+// Returns { data } or { error }. `id` and unknown keys are ignored.
+function parseClientPatch(body) {
+  const data = {};
+  for (const field of EDITABLE_FIELDS) {
+    const value = body[field];
+    if (value === undefined) continue;
+    if (TEXT_FIELDS.includes(field)) {
+      if (typeof value !== "string" || value.trim() === "") return { error: `${field} is required` };
+      data[field] = value.trim();
+    } else if (field === "due") {
+      if (!Number.isInteger(value) || value < 0) {
+        return { error: "due must be a whole number of rupees, zero or more" };
+      }
+      data.due = value;
+    } else if (field === "status") {
+      if (!VALID_STATUSES.includes(value)) {
+        return { error: `status must be one of: ${VALID_STATUSES.join(", ")}` };
+      }
+      data.status = value;
+    } else if (field === "invoiceDate" || field === "lastCall") {
+      const d = parseDate(value);
+      if (!d) return { error: `${field} must be YYYY-MM-DD or an ISO timestamp` };
+      data[field] = d;
+    } else if (field === "notes") {
+      if (value !== null && typeof value !== "string") return { error: "notes must be a string" };
+      data.notes = value;
+    }
+  }
+  return { data };
+}
+
+// With no editable fields in the body, logs a call (lastCall = now); otherwise
+// updates only the fields sent and leaves lastCall alone unless it is sent.
+export async function updateClient(req, res) {
   const { id } = req.params;
+  const { data, error } = parseClientPatch(req.body ?? {});
+  if (error) return res.status(400).json({ error });
+  if (Object.keys(data).length === 0) data.lastCall = new Date();
 
   try {
-    const client = await prisma.client.update({ where: { id }, data: { lastCall: new Date() } });
+    const client = await prisma.client.update({ where: { id }, data });
     res.json(client);
   } catch (err) {
     if (err.code === "P2025") return res.status(404).json({ error: `Client ${id} not found` });

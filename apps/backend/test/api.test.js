@@ -290,6 +290,93 @@ test("PATCH /api/clients/:id returns 404 for an unknown client", async () => {
   assert.equal(res.status, 404);
 });
 
+// Runs fn against seed client c1 and always restores its original row.
+async function withRestoredC1(fn) {
+  const original = await prisma.client.findUnique({ where: { id: "c1" } });
+  assert.ok(original, "seed client c1 missing");
+  try {
+    await fn(original);
+  } finally {
+    const { id, ...rest } = original;
+    await prisma.client.update({ where: { id }, data: rest });
+  }
+}
+
+test("PATCH /api/clients/:id edits only the fields sent and leaves lastCall alone", async () => {
+  await withRestoredC1(async (original) => {
+    const res = await patch("/api/clients/c1", {
+      name: "  Renamed  ",
+      due: 0,
+      status: "paid",
+      notes: "edited",
+      invoiceDate: "2026-01-02",
+      id: "c999",
+    });
+    assert.equal(res.status, 200);
+    const c = await res.json();
+    assert.equal(c.id, "c1");
+    assert.equal(c.name, "Renamed");
+    assert.equal(c.due, 0);
+    assert.equal(c.status, "paid");
+    assert.equal(c.notes, "edited");
+    assert.equal(c.invoiceDate, "2026-01-02T00:00:00.000Z");
+    assert.equal(c.contact, original.contact);
+    assert.equal(c.phone, original.phone);
+    assert.equal(c.lastCall, original.lastCall.toISOString());
+  });
+});
+
+test("PATCH /api/clients/:id sets lastCall and clears notes when sent", async () => {
+  await withRestoredC1(async () => {
+    const res = await patch("/api/clients/c1", { lastCall: "2026-02-03T04:05:00Z", notes: null });
+    assert.equal(res.status, 200);
+    const c = await res.json();
+    assert.equal(c.lastCall, "2026-02-03T04:05:00.000Z");
+    assert.equal(c.notes, null);
+  });
+});
+
+test("PATCH /api/clients/:id rejects invalid fields with 400 and changes nothing", async () => {
+  await withRestoredC1(async (original) => {
+    const bad = [
+      { name: "  " },
+      { contact: 5 },
+      { phone: "" },
+      { due: -1 },
+      { due: 1.5 },
+      { due: "100" },
+      { status: "late" },
+      { invoiceDate: "2026-02-30" },
+      { invoiceDate: "nope" },
+      { lastCall: "nope" },
+      { lastCall: null },
+      { notes: 7 },
+      { name: "Fine", due: -1 },
+    ];
+    for (const body of bad) {
+      const res = await patch("/api/clients/c1", body);
+      assert.equal(res.status, 400, JSON.stringify(body));
+      assert.equal(typeof (await res.json()).error, "string");
+    }
+    assert.deepEqual(await prisma.client.findUnique({ where: { id: "c1" } }), original);
+  });
+});
+
+test("PATCH /api/clients/:id with no body logs a call", async () => {
+  await withRestoredC1(async (original) => {
+    const res = await fetch(base + "/api/clients/c1", { method: "PATCH" });
+    assert.equal(res.status, 200);
+    const c = await res.json();
+    assert.ok(Date.parse(c.lastCall) > original.lastCall.getTime());
+    assert.equal(c.name, original.name);
+  });
+});
+
+test("PATCH /api/clients/:id returns 404 for an unknown client even with fields", async () => {
+  const res = await patch("/api/clients/c999", { name: "X" });
+  assert.equal(res.status, 404);
+});
+
 const validClient = {
   name: "Test Client",
   contact: "Tester",
