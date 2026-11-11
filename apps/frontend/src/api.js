@@ -2,6 +2,7 @@
 // The API speaks `assigneeId` and ISO timestamps; the UI speaks `assignee` and YYYY-MM-DD
 // (calendar dates by UTC day, moments in time by the viewer's local day).
 // Convert at this boundary only.
+import { activityQuery } from "./activity.js";
 
 // Empty/unset means "no API": callers fall back to mock data.
 export const API_URL = (import.meta.env?.VITE_API_URL ?? "").trim().replace(/\/+$/, "");
@@ -490,4 +491,10 @@ export async function updateEnquiryStatus(id, status) {
 
 export async function deleteEnquiry(id) {
   await request(`/api/enquiries/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+// Admin only. One page of the activity log, newest first: { entries, nextBefore }.
+// filters is { actor, kind, before }; see activityQuery.
+export async function fetchActivity(filters) {
+  return request(`/api/activity${activityQuery(filters)}`);
 }

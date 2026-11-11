@@ -142,6 +142,8 @@ export async function requireAuth(req, res, next) {
   if (!viewer) return res.status(401).json({ error: "Please sign in." });
   req.role = viewer.role;
   req.employeeId = viewer.employeeId;
+  // The whole viewer, name included, for the activity log.
+  req.viewer = viewer;
   next();
 }
 
@@ -173,6 +175,8 @@ export function recordFailedLogin(ip, now = Date.now()) {
   const entry = failures.get(ip);
   if (!entry || entry.resetAt <= now) failures.set(ip, { count: 1, resetAt: now + LOCKOUT_MS });
   else entry.count += 1;
+  // Whether this attempt was the one that locked the address out.
+  return failures.get(ip).count === MAX_FAILED_LOGINS;
 }
 
 export const clearFailedLogins = (ip) => (ip === undefined ? failures.clear() : failures.delete(ip));

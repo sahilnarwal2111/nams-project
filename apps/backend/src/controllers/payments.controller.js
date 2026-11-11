@@ -1,12 +1,7 @@
 import { prisma } from "../lib/prisma.js";
 import { parseDate } from "../lib/dates.js";
-
-class PaymentError extends Error {
-  constructor(status, message) {
-    super(message);
-    this.status = status;
-  }
-}
+import { inTransaction, logActivity, quoted, rupees } from "../lib/activity.js";
+import { HttpError, sendHttpError } from "../lib/httpError.js";
 
 export async function listPayments(req, res) {
   const { id } = req.params;
@@ -42,7 +37,7 @@ export async function recordPayment(req, res) {
   }
 
   try {
-    const result = await prisma.$transaction(async (tx) => {
+    const result = await inTransaction(async (tx) => {
       // The condition and the decrement are one statement, so two payments
       // arriving together cannot take the balance below zero.
       const { count } = await tx.client.updateMany({
@@ -51,19 +46,34 @@ export async function recordPayment(req, res) {
       });
       if (count === 0) {
         const existing = await tx.client.findUnique({ where: { id }, select: { due: true } });
-        if (!existing) throw new PaymentError(404, `Client ${id} not found`);
-        throw new PaymentError(400, `amount is more than the outstanding ${existing.due}`);
+        if (!existing) throw new HttpError(404, `Client ${id} not found`);
+        throw new HttpError(400, `amount is more than the outstanding ${existing.due}`);
       }
       let client = await tx.client.findUnique({ where: { id } });
+      const statusBefore = client.status;
       if (client.due === 0 && client.status !== "paid") {
         client = await tx.client.update({ where: { id }, data: { status: "paid" } });
       }
       const payment = await tx.payment.create({ data: { clientId: id, amount, note, receivedAt } });
+      // Filed under the client, so a client's history includes its payments.
+      await logActivity(tx, req, {
+        action: "payment.recorded",
+        entityType: "client",
+        entityId: id,
+        summary: `Recorded ${rupees(amount)} received from ${quoted(client.name)}; ${rupees(client.due)} still due`,
+        changes: {
+          paymentId: { from: null, to: payment.id },
+          amount: { from: null, to: amount },
+          receivedAt: { from: null, to: payment.receivedAt.toISOString() },
+          ...(payment.note ? { note: { from: null, to: payment.note } } : {}),
+          due: { from: client.due + amount, to: client.due },
+          ...(statusBefore !== client.status ? { status: { from: statusBefore, to: client.status } } : {}),
+        },
+      });
       return { payment, client };
     });
     res.status(201).json(result);
   } catch (err) {
-    if (err instanceof PaymentError) return res.status(err.status).json({ error: err.message });
-    throw err;
+    sendHttpError(res, err);
   }
 }

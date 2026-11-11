@@ -1,5 +1,7 @@
 import { prisma } from "../lib/prisma.js";
 import { parseDate } from "../lib/dates.js";
+import { diff, inTransaction, lockAndFind, logActivity, quoted } from "../lib/activity.js";
+import { HttpError, sendHttpError } from "../lib/httpError.js";
 
 const VALID_STATUSES = ["todo", "inprogress", "done"];
 const VALID_PRIORITIES = ["low", "medium", "high"];
@@ -95,8 +97,19 @@ export async function createTask(req, res) {
   // Retry if a concurrent request grabbed the same id (unique violation).
   for (let attempt = 0; attempt < 5; attempt++) {
     try {
-      const task = await prisma.task.create({
-        data: { id: await nextTaskId(), title: title.trim(), client: client.trim(), status, priority, assigneeId, ...details.data, ...stamps },
+      const id = await nextTaskId();
+      const task = await inTransaction(async (tx) => {
+        const created = await tx.task.create({
+          data: { id, title: title.trim(), client: client.trim(), status, priority, assigneeId, ...details.data, ...stamps },
+        });
+        await logActivity(tx, req, {
+          action: "task.created",
+          entityType: "task",
+          entityId: created.id,
+          summary: `Added ${created.id} ${quoted(created.title)}, assigned to ${employee.name}`,
+          changes: diff(null, created),
+        });
+        return created;
       });
       return res.status(201).json(task);
     } catch (err) {
@@ -109,12 +122,58 @@ export async function createTask(req, res) {
 export async function deleteTask(req, res) {
   const { id } = req.params;
   try {
-    await prisma.task.delete({ where: { id } });
+    await inTransaction(async (tx) => {
+      const before = await lockAndFind(tx, "task", id);
+      if (!before) throw new HttpError(404, `Task ${id} not found`);
+      await tx.task.delete({ where: { id } });
+      // The whole record goes into the log, so deleted work can still be read.
+      await logActivity(tx, req, {
+        action: "task.deleted",
+        entityType: "task",
+        entityId: id,
+        summary: `Deleted ${id} ${quoted(before.title)}`,
+        changes: diff(before, null),
+      });
+    });
     res.status(204).end();
   } catch (err) {
-    if (err.code === "P2025") return res.status(404).json({ error: `Task ${id} not found` });
-    throw err;
+    sendHttpError(res, err);
   }
+}
+
+const STATUS_LABELS = { todo: "To Do", inprogress: "In Progress", done: "Completed" };
+const FIELD_LABELS = {
+  title: "work",
+  client: "customer",
+  priority: "priority",
+  customerPhone: "phone",
+  district: "district",
+  department: "department",
+  workTypes: "work types",
+  details: "details",
+  expectedCompletion: "expected completion",
+};
+
+// The log line for an edit: what moved, who it went to, which fields changed.
+async function describeTaskChange(tx, task, changes) {
+  const parts = [];
+  if (changes.status) {
+    parts.push(`moved from ${STATUS_LABELS[changes.status.from]} to ${STATUS_LABELS[changes.status.to]}`);
+  }
+  if (changes.assigneeId) {
+    const people = await tx.employee.findMany({
+      where: { id: { in: [changes.assigneeId.from, changes.assigneeId.to] } },
+      select: { id: true, name: true },
+    });
+    const name = (id) => people.find((p) => p.id === id)?.name ?? id;
+    parts.push(`reassigned from ${name(changes.assigneeId.from)} to ${name(changes.assigneeId.to)}`);
+  }
+  const fields = Object.keys(changes).filter((field) => field in FIELD_LABELS);
+  if (fields.length > 0) parts.push(`changed ${fields.map((field) => FIELD_LABELS[field]).join(", ")}`);
+
+  const name = `${task.id} ${quoted(task.title)}`;
+  if (parts.length === 1 && changes.status) return `Moved ${name} from ${STATUS_LABELS[changes.status.from]} to ${STATUS_LABELS[changes.status.to]}`;
+  return `Edited ${name}: ${parts.join("; ")}`;
 }
 
 const EDITABLE_FIELDS = ["title", "client", "assigneeId", "priority", "status"];
@@ -152,45 +211,58 @@ export async function updateTask(req, res) {
   // Editing the details is for the admin and for the person the work is
   // assigned to, who may not hand it to someone else.
   const onlyMoving = Object.keys(data).every((field) => field === "status");
-  if (req.role !== "admin" && !onlyMoving) {
-    if (!req.employeeId) {
-      return res.status(403).json({ error: "Sign in with your own name to edit the details of your work." });
-    }
-    const existing = await prisma.task.findUnique({ where: { id }, select: { assigneeId: true } });
-    if (!existing) return res.status(404).json({ error: `Task ${id} not found` });
-    if (existing.assigneeId !== req.employeeId) {
-      return res.status(403).json({ error: "You can only edit the details of work assigned to you." });
-    }
-    if ("assigneeId" in data && data.assigneeId !== req.employeeId) {
-      return res.status(403).json({ error: "Only an admin can reassign work." });
-    }
-  }
-
-  if ("priority" in data && !VALID_PRIORITIES.includes(data.priority)) {
-    return res.status(400).json({ error: `priority must be one of: ${VALID_PRIORITIES.join(", ")}` });
-  }
-  if ("status" in data && !VALID_STATUSES.includes(data.status)) {
-    return res.status(400).json({ error: `status must be one of: ${VALID_STATUSES.join(", ")}` });
-  }
-  if ("assigneeId" in data) {
-    const employee = await prisma.employee.findUnique({ where: { id: data.assigneeId } });
-    if (!employee) return res.status(400).json({ error: `assigneeId ${data.assigneeId} is not an existing employee` });
-  }
-
-  // completedAt follows the status: stamped when a task first reaches "done",
-  // kept while it stays there, cleared when it is moved back.
-  if ("status" in data) {
-    const existing = await prisma.task.findUnique({ where: { id }, select: { status: true } });
-    if (!existing) return res.status(404).json({ error: `Task ${id} not found` });
-    if (data.status !== "done") data.completedAt = null;
-    else if (existing.status !== "done") data.completedAt = new Date();
-  }
+  const notFound = () => new HttpError(404, `Task ${id} not found`);
 
   try {
-    const task = await prisma.task.update({ where: { id }, data });
+    const task = await inTransaction(async (tx) => {
+      const before = await lockAndFind(tx, "task", id);
+
+      if (req.role !== "admin" && !onlyMoving) {
+        if (!req.employeeId) throw new HttpError(403, "Sign in with your own name to edit the details of your work.");
+        if (!before) throw notFound();
+        if (before.assigneeId !== req.employeeId) {
+          throw new HttpError(403, "You can only edit the details of work assigned to you.");
+        }
+        if ("assigneeId" in data && data.assigneeId !== req.employeeId) {
+          throw new HttpError(403, "Only an admin can reassign work.");
+        }
+      }
+
+      if ("priority" in data && !VALID_PRIORITIES.includes(data.priority)) {
+        throw new HttpError(400, `priority must be one of: ${VALID_PRIORITIES.join(", ")}`);
+      }
+      if ("status" in data && !VALID_STATUSES.includes(data.status)) {
+        throw new HttpError(400, `status must be one of: ${VALID_STATUSES.join(", ")}`);
+      }
+      if ("assigneeId" in data) {
+        const employee = await tx.employee.findUnique({ where: { id: data.assigneeId } });
+        if (!employee) throw new HttpError(400, `assigneeId ${data.assigneeId} is not an existing employee`);
+      }
+      if (!before) throw notFound();
+
+      // completedAt follows the status: stamped when a task first reaches
+      // "done", kept while it stays there, cleared when it is moved back.
+      if ("status" in data) {
+        if (data.status !== "done") data.completedAt = null;
+        else if (before.status !== "done") data.completedAt = new Date();
+      }
+
+      const updated = await tx.task.update({ where: { id }, data });
+      // Saving without changing anything is not activity.
+      const changes = diff(before, updated);
+      if (changes) {
+        await logActivity(tx, req, {
+          action: Object.keys(changes).every((field) => field === "status" || field === "completedAt") ? "task.moved" : "task.updated",
+          entityType: "task",
+          entityId: id,
+          summary: await describeTaskChange(tx, updated, changes),
+          changes,
+        });
+      }
+      return updated;
+    });
     res.json(task);
   } catch (err) {
-    if (err.code === "P2025") return res.status(404).json({ error: `Task ${id} not found` });
-    throw err;
+    sendHttpError(res, err);
   }
 }

@@ -7,6 +7,7 @@ test("pageFromHash reads #/page and falls back to home", () => {
   assert.equal(pageFromHash("#/payments"), "payments");
   assert.equal(pageFromHash("#/enquiries"), "enquiries");
   assert.equal(pageFromHash("#/team"), "team");
+  assert.equal(pageFromHash("#/activity"), "activity");
   assert.equal(pageFromHash("#/completed"), "completed");
   assert.equal(pageFromHash("#/work?x=1"), "work");
   for (const h of ["", "#", "#/", "#/nope", "#services", "#enquiry", undefined, null, "#/__proto__", "#/constructor"]) {
