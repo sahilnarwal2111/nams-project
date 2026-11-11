@@ -148,6 +148,21 @@ export async function updateTask(req, res) {
   if ("title" in data) data.title = data.title.trim();
   if ("client" in data) data.client = data.client.trim();
 
+  // Staff may change only their own work and may not hand it to someone else.
+  if (req.role !== "admin") {
+    if (!req.employeeId) {
+      return res.status(403).json({ error: "Sign in with your own name to change your work." });
+    }
+    const existing = await prisma.task.findUnique({ where: { id }, select: { assigneeId: true } });
+    if (!existing) return res.status(404).json({ error: `Task ${id} not found` });
+    if (existing.assigneeId !== req.employeeId) {
+      return res.status(403).json({ error: "You can only change work assigned to you." });
+    }
+    if ("assigneeId" in data && data.assigneeId !== req.employeeId) {
+      return res.status(403).json({ error: "Only an admin can reassign work." });
+    }
+  }
+
   if ("priority" in data && !VALID_PRIORITIES.includes(data.priority)) {
     return res.status(400).json({ error: `priority must be one of: ${VALID_PRIORITIES.join(", ")}` });
   }

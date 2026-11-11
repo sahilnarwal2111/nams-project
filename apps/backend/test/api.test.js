@@ -760,7 +760,7 @@ async function withLogin(fn) {
 
 test("with no APP_PASSWORD the API is open and the session says login is not required", async () => {
   assert.equal(process.env.APP_PASSWORD, undefined);
-  assert.deepEqual(await (await get("/api/auth/session")).json(), { required: false, authenticated: false, role: "admin" });
+  assert.deepEqual(await (await get("/api/auth/session")).json(), { required: false, authenticated: false, role: "admin", employeeId: null, name: null, people: [] });
   assert.equal((await get("/api/tasks")).status, 200);
   assert.equal((await signIn("anything")).status, 400);
 });
@@ -778,7 +778,7 @@ test("with APP_PASSWORD set, data endpoints need a token but health and session 
     assert.equal((await get("/api/clients/c1/payments")).status, 401);
     assert.equal((await post("/api/clients/c1/payments", { amount: 1 })).status, 401);
     assert.equal((await get("/api/health")).status, 200);
-    assert.deepEqual(await (await get("/api/auth/session")).json(), { required: true, authenticated: false, role: null });
+    assert.deepEqual(await (await get("/api/auth/session")).json(), { required: true, authenticated: false, role: null, employeeId: null, name: null, people: [] });
   });
   assert.equal(await prisma.client.count({ where: { id: "c1" } }), 1, "an unauthenticated delete went through");
 });
@@ -793,7 +793,7 @@ test("the right password gives a token that opens the API", async () => {
 
     assert.equal((await authed("/api/tasks", token)).status, 200);
     assert.equal((await authed("/api/clients", token)).status, 200);
-    assert.deepEqual(await (await authed("/api/auth/session", token)).json(), { required: true, authenticated: true, role: "staff" });
+    assert.deepEqual(await (await authed("/api/auth/session", token)).json(), { required: true, authenticated: true, role: "staff", employeeId: null, name: null, people: [] });
   });
 });
 
@@ -1051,9 +1051,9 @@ test("each password signs in with its own role, and the session reports it", asy
   await withRoles(async ({ staff, admin, staffLogin, adminLogin }) => {
     assert.equal(staffLogin.role, "staff");
     assert.equal(adminLogin.role, "admin");
-    assert.deepEqual(await (await authed("/api/auth/session", staff)).json(), { required: true, authenticated: true, role: "staff" });
-    assert.deepEqual(await (await authed("/api/auth/session", admin)).json(), { required: true, authenticated: true, role: "admin" });
-    assert.deepEqual(await (await get("/api/auth/session")).json(), { required: true, authenticated: false, role: null });
+    assert.deepEqual(await (await authed("/api/auth/session", staff)).json(), { required: true, authenticated: true, role: "staff", employeeId: null, name: null, people: [] });
+    assert.deepEqual(await (await authed("/api/auth/session", admin)).json(), { required: true, authenticated: true, role: "admin", employeeId: null, name: null, people: [] });
+    assert.deepEqual(await (await get("/api/auth/session")).json(), { required: true, authenticated: false, role: null, employeeId: null, name: null, people: [] });
   });
 });
 
@@ -1182,4 +1182,197 @@ test("with only the admin password set, login is still required and that passwor
     delete process.env.ADMIN_PASSWORD;
     clearFailedLogins();
   }
+});
+
+// --- Personal sign-in: each person changes only their own work ---
+
+import { MIN_PERSONAL_PASSWORD } from "../src/lib/auth.js";
+
+const ANKIT_PASSWORD = "ankit-own-pass";
+const RAJESH_PASSWORD = "rajesh-own-pass";
+
+// Login on with both shared passwords, Ankit (e6) and Rajesh (e4) given their
+// own passwords by the admin. Removes the personal passwords afterwards.
+async function withPeople(fn) {
+  await withRoles(async (tokens) => {
+    const put = (id, password) => authed(`/api/employees/${id}/password`, tokens.admin, jsonBody("PUT", { password }));
+    try {
+      assert.equal((await put("e6", ANKIT_PASSWORD)).status, 204);
+      assert.equal((await put("e4", RAJESH_PASSWORD)).status, 204);
+      const ankit = await (await post("/api/auth/login", { as: "e6", password: ANKIT_PASSWORD })).json();
+      const rajesh = await (await post("/api/auth/login", { as: "e4", password: RAJESH_PASSWORD })).json();
+      await fn({ ...tokens, ankit: ankit.token, rajesh: rajesh.token, ankitLogin: ankit });
+    } finally {
+      await prisma.employee.updateMany({ data: { passwordHash: null } });
+    }
+  });
+}
+
+test("an admin sets a personal password; it is stored hashed and never sent back", async () => {
+  await withPeople(async ({ admin, staff, ankitLogin }) => {
+    assert.equal(ankitLogin.role, "staff");
+    assert.equal(ankitLogin.employeeId, "e6");
+    const stored = (await prisma.employee.findUnique({ where: { id: "e6" } })).passwordHash;
+    assert.match(stored, /^scrypt\$/);
+    assert.ok(!stored.includes(ANKIT_PASSWORD));
+
+    for (const token of [admin, staff]) {
+      const text = await (await authed("/api/employees", token)).text();
+      assert.ok(!text.includes("passwordHash") && !text.includes("scrypt"), "no hash in the list");
+    }
+    const forAdmin = await (await authed("/api/employees", admin)).json();
+    assert.equal(forAdmin.find((e) => e.id === "e6").hasPassword, true);
+    assert.equal(forAdmin.find((e) => e.id === "e1").hasPassword, false);
+    const forStaff = await (await authed("/api/employees", staff)).json();
+    assert.equal("hasPassword" in forStaff[0], false);
+  });
+});
+
+test("the session names the person and lists who can sign in", async () => {
+  await withPeople(async ({ ankit }) => {
+    assert.deepEqual(await (await authed("/api/auth/session", ankit)).json(), {
+      required: true,
+      authenticated: true,
+      role: "staff",
+      employeeId: "e6",
+      name: "Ankit",
+      people: [{ id: "e4", name: "Rajesh Kumar" }, { id: "e6", name: "Ankit" }],
+    });
+    const anon = await (await get("/api/auth/session")).json();
+    assert.deepEqual(anon.people.map((p) => p.id), ["e4", "e6"]);
+    assert.ok(!JSON.stringify(anon).includes("scrypt"));
+  });
+});
+
+test("personal sign-in refuses a wrong password, someone else's password and people without one", async () => {
+  await withPeople(async () => {
+    const tries = [
+      { as: "e6", password: "wrong" },
+      { as: "e6", password: RAJESH_PASSWORD },
+      { as: "e6", password: ADMIN_PASSWORD },
+      { as: "e1", password: ANKIT_PASSWORD },
+      { as: "e999", password: ANKIT_PASSWORD },
+      { as: "e6" },
+      { as: 6, password: ANKIT_PASSWORD },
+      { as: "admin", password: PASSWORD },
+      { as: "office", password: ADMIN_PASSWORD },
+    ];
+    for (const body of tries) {
+      clearFailedLogins();
+      const res = await post("/api/auth/login", body);
+      assert.equal(res.status, 401, JSON.stringify(body));
+      assert.equal((await res.json()).token, undefined);
+    }
+    clearFailedLogins();
+    assert.equal((await post("/api/auth/login", { as: "admin", password: ADMIN_PASSWORD })).status, 200);
+    assert.equal((await post("/api/auth/login", { as: "office", password: PASSWORD })).status, 200);
+  });
+});
+
+test("only an admin can set or remove personal passwords, and short ones are refused", async () => {
+  await withPeople(async ({ admin, staff, ankit }) => {
+    for (const token of [staff, ankit]) {
+      assert.equal((await authed("/api/employees/e1/password", token, jsonBody("PUT", { password: "takeover-123" }))).status, 403);
+      assert.equal((await authed("/api/employees/e4/password", token, { method: "DELETE" })).status, 403);
+    }
+    assert.equal((await prisma.employee.findUnique({ where: { id: "e1" } })).passwordHash, null);
+    for (const password of ["x".repeat(MIN_PERSONAL_PASSWORD - 1), "", 123456, null, "x".repeat(201)]) {
+      assert.equal((await authed("/api/employees/e1/password", admin, jsonBody("PUT", { password }))).status, 400, String(password));
+    }
+    assert.equal((await authed("/api/employees/e999/password", admin, jsonBody("PUT", { password: "long-enough" }))).status, 404);
+    assert.equal((await authed("/api/employees/e999/password", admin, { method: "DELETE" })).status, 404);
+  });
+});
+
+test("a person can edit and move their own work but not anyone else's", async () => {
+  const mine = await prisma.task.findUnique({ where: { id: "NK-102" } }); // Ankit's
+  const theirs = await prisma.task.findUnique({ where: { id: "NK-105" } }); // Rajesh's
+  try {
+    await withPeople(async ({ ankit }) => {
+      const edit = await authed("/api/tasks/NK-102", ankit, jsonBody("PATCH", { title: "Boundary survey (Ankit edit)", details: "Took GPS" }));
+      assert.equal(edit.status, 200);
+      assert.equal((await edit.json()).title, "Boundary survey (Ankit edit)");
+      const move = await authed("/api/tasks/NK-102", ankit, jsonBody("PATCH", { status: "inprogress" }));
+      assert.equal(move.status, 200);
+      assert.equal((await move.json()).status, "inprogress");
+      assert.equal((await authed("/api/tasks/NK-102", ankit, jsonBody("PATCH", { assigneeId: "e6", priority: "high" }))).status, 200, "keeping themselves is fine");
+
+      for (const body of [{ status: "done" }, { title: "Not mine" }]) {
+        const res = await authed("/api/tasks/NK-105", ankit, jsonBody("PATCH", body));
+        assert.equal(res.status, 403, JSON.stringify(body));
+        assert.match((await res.json()).error, /assigned to you/);
+      }
+      const reassign = await authed("/api/tasks/NK-102", ankit, jsonBody("PATCH", { assigneeId: "e4" }));
+      assert.equal(reassign.status, 403);
+      assert.match((await reassign.json()).error, /admin/i);
+      assert.equal((await authed("/api/tasks/NK-999", ankit, jsonBody("PATCH", { status: "done" }))).status, 404);
+    });
+    const after = await prisma.task.findUnique({ where: { id: "NK-105" } });
+    assert.deepEqual(after, theirs, "someone else's work is untouched");
+    assert.equal((await prisma.task.findUnique({ where: { id: "NK-102" } })).assigneeId, "e6");
+  } finally {
+    const { id, ...data } = mine;
+    await prisma.task.update({ where: { id }, data });
+  }
+});
+
+test("only an admin can create or delete work; the office sign-in cannot change any", async () => {
+  const before = await prisma.task.count();
+  const newWork = { title: "Role test work", client: "Nobody", assigneeId: "e6", priority: "low" };
+  await withPeople(async ({ ankit, staff, admin }) => {
+    for (const token of [ankit, staff]) {
+      assert.equal((await authed("/api/tasks", token, jsonBody("POST", newWork))).status, 403);
+      assert.equal((await authed("/api/tasks/NK-102", token, { method: "DELETE" })).status, 403);
+    }
+    const office = await authed("/api/tasks/NK-102", staff, jsonBody("PATCH", { status: "done" }));
+    assert.equal(office.status, 403);
+    assert.match((await office.json()).error, /own name/);
+    assert.equal(await prisma.task.count(), before);
+
+    const created = await authed("/api/tasks", admin, jsonBody("POST", newWork));
+    assert.equal(created.status, 201);
+    const { id } = await created.json();
+    assert.equal((await authed(`/api/tasks/${id}`, admin, jsonBody("PATCH", { assigneeId: "e4", status: "done" }))).status, 200);
+    assert.equal((await authed(`/api/tasks/${id}`, admin, { method: "DELETE" })).status, 204);
+  });
+  assert.equal(await prisma.task.count(), before);
+});
+
+test("a personal sign-in stops working when the admin changes or removes the password", async () => {
+  await withPeople(async ({ admin, ankit, rajesh }) => {
+    assert.equal((await authed("/api/tasks", ankit)).status, 200);
+    assert.equal((await authed("/api/employees/e6/password", admin, jsonBody("PUT", { password: "a-new-ankit-pass" }))).status, 204);
+    assert.equal((await authed("/api/tasks", ankit)).status, 401, "old token after a new password");
+    assert.equal((await post("/api/auth/login", { as: "e6", password: "a-new-ankit-pass" })).status, 200);
+
+    assert.equal((await authed("/api/employees/e4/password", admin, { method: "DELETE" })).status, 204);
+    assert.equal((await authed("/api/tasks", rajesh)).status, 401, "removed password");
+    clearFailedLogins();
+    assert.equal((await post("/api/auth/login", { as: "e4", password: RAJESH_PASSWORD })).status, 401);
+  });
+});
+
+test("personal tokens cannot be forged, relabelled or used after expiry", async () => {
+  await withPeople(async ({ ankit }) => {
+    const [, , expires, signature] = ankit.split(".");
+    const bad = [
+      `person.e4.${expires}.${signature}`,
+      `person.e6.${Number(expires) + 1000}.${signature}`,
+      `person.e6.${expires}.${signature.slice(0, -2)}xx`,
+      `person.e6.${expires}`,
+      `person.e6.${expires}.${signature}.extra`,
+      `admin.${expires}.${signature}`,
+      `staff.${expires}.${signature}`,
+      `person.e6.1.${signature}`,
+    ];
+    for (const t of bad) assert.equal((await authed("/api/tasks", t)).status, 401, t);
+    assert.equal((await authed("/api/tasks", ankit)).status, 200);
+  });
+});
+
+test("personal passwords do nothing while sign-in is switched off", async () => {
+  assert.equal(process.env.APP_PASSWORD, undefined);
+  const res = await post("/api/auth/login", { as: "e6", password: "whatever-123" });
+  assert.equal(res.status, 400);
+  assert.deepEqual((await (await get("/api/auth/session")).json()).people, []);
 });

@@ -62,7 +62,10 @@ export function tasksFromApi(list) {
 }
 
 export function employeeFromApi(e) {
-  return { id: e.id, name: e.name, role: e.role, initials: e.initials };
+  const employee = { id: e.id, name: e.name, role: e.role, initials: e.initials };
+  // Only an admin is told whether someone has their own password.
+  if (typeof e.hasPassword === "boolean") employee.hasPassword = e.hasPassword;
+  return employee;
 }
 
 export function employeesFromApi(list) {
@@ -273,6 +276,30 @@ export function sessionRole(session) {
   return session.role === "admin" ? "admin" : "staff";
 }
 
+// Whether the viewer may edit and move a task: an admin any task, a person
+// signed in with their own password only work assigned to them.
+export function canEditTask(task, viewer) {
+  return Boolean(viewer?.isAdmin || (viewer?.employeeId && task.assignee === viewer.employeeId));
+}
+
+// Who to sign in as: an employee id, "office" or "admin". People come first,
+// then the office password, which everyone used before personal passwords. A remembered choice
+// is kept only while it is still on offer.
+export function signInChoices(people = []) {
+  return [...people.map((p) => ({ value: p.id, label: p.name })), { value: "office", label: "Office (view only)" }, { value: "admin", label: "Admin" }];
+}
+export function defaultSignInChoice(people = [], remembered = null) {
+  const choices = signInChoices(people);
+  return choices.some((c) => c.value === remembered) ? remembered : choices[0].value;
+}
+
+// Why a personal password cannot be saved, or null. Mirrors the API.
+export function personalPasswordError(password) {
+  if (password.length < 6) return "Use at least 6 characters.";
+  if (password.length > 200) return "Use 200 characters or fewer.";
+  return null;
+}
+
 // Whether a client still owes money. Staff are not sent the amount, so for
 // them the status decides.
 export function paymentPending(client) {
@@ -390,13 +417,27 @@ export async function deleteClient(id) {
 
 export async function fetchSession() {
   const session = await request("/api/auth/session");
-  return { state: sessionState(session), role: sessionRole(session) };
+  return {
+    state: sessionState(session),
+    role: sessionRole(session),
+    employeeId: session.employeeId ?? null,
+    name: session.name ?? null,
+    people: Array.isArray(session.people) ? session.people : [],
+  };
 }
 
-export async function login(password) {
-  const { token, role } = await request("/api/auth/login", { method: "POST", body: JSON.stringify({ password }) });
+// as is "admin", "office" or an employee id.
+export async function login(password, as) {
+  const { token } = await request("/api/auth/login", { method: "POST", body: JSON.stringify({ password, as }) });
   setToken(token);
-  return role === "admin" ? "admin" : "staff";
+}
+
+export async function setEmployeePassword(id, password) {
+  await request(`/api/employees/${encodeURIComponent(id)}/password`, { method: "PUT", body: JSON.stringify({ password }) });
+}
+
+export async function clearEmployeePassword(id) {
+  await request(`/api/employees/${encodeURIComponent(id)}/password`, { method: "DELETE" });
 }
 
 export function logout() {

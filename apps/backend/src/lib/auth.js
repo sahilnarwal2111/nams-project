@@ -1,15 +1,23 @@
 import crypto from "node:crypto";
+import { promisify } from "node:util";
+import { prisma } from "./prisma.js";
 
-// Sign-in with two shared passwords, set on the server:
+// Sign-in with two shared passwords, set on the server, plus personal ones:
 //   APP_PASSWORD    the office password. Signs in as "staff": everything except
 //                   money amounts.
 //   ADMIN_PASSWORD  signs in as "admin": amounts, payments and client records.
+//   personal        each employee's own password, set by an admin and stored
+//                   hashed on Employee. Signs in as "staff" who is also known
+//                   by name, so they can change their own tasks.
+// Personal passwords only work while sign-in is switched on.
 // While both are unset, login is switched off and the API is open with admin
 // rights: that is the local-development and test default.
 //
 // A token is "<role>.<expiry ms>.<signature>". The signing key is derived from
 // that role's password, so changing a password signs that role out. No database
-// table and no extra dependency.
+// table and no extra dependency. A personal token is
+// "person.<employee id>.<expiry ms>.<signature>", signed with a key derived
+// from that person's stored hash, so a new password signs them out.
 
 export const TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
@@ -44,7 +52,7 @@ export function issueToken(role, now = Date.now()) {
 // The role a token was issued for, or null if it is forged, expired or for a
 // role whose password has since been removed or changed.
 export function verifyToken(token, now = Date.now()) {
-  if (typeof token !== "string") return null;
+  if (typeof token !== "string" || token.startsWith("person.")) return null;
   const [role, expires, signature, ...rest] = token.split(".");
   if (rest.length > 0 || !Object.hasOwn(PASSWORD_ENV, role) || !/^\d+$/.test(expires ?? "") || !signature) return null;
   if (passwordFor(role) === "") return null;
@@ -56,16 +64,78 @@ export function tokenFromRequest(req) {
   return match ? match[1] : null;
 }
 
-// "admin" or "staff" for this request, or null when sign-in is needed. With
-// login switched off everyone is an admin.
-export const roleFromRequest = (req) => (authEnabled() ? verifyToken(tokenFromRequest(req)) : "admin");
+/* ---- personal passwords ---------------------------------------------- */
+
+const scrypt = promisify(crypto.scrypt);
+export const MIN_PERSONAL_PASSWORD = 6;
+
+export async function hashPassword(password) {
+  const salt = crypto.randomBytes(16);
+  const hash = await scrypt(password, salt, 32);
+  return `scrypt$${salt.toString("base64")}$${hash.toString("base64")}`;
+}
+
+export async function passwordMatches(password, stored) {
+  if (typeof password !== "string" || typeof stored !== "string") return false;
+  const [scheme, salt, hash] = stored.split("$");
+  if (scheme !== "scrypt" || !salt || !hash) return false;
+  const expected = Buffer.from(hash, "base64");
+  const actual = await scrypt(password, Buffer.from(salt, "base64"), expected.length);
+  return crypto.timingSafeEqual(actual, expected);
+}
+
+const personKey = (id, stored) => digest(`nk-consultancy-person-key:${id}:${stored}`);
+const signPerson = (id, stored, expires) =>
+  crypto.createHmac("sha256", personKey(id, stored)).update(`person.${id}.${expires}`).digest("base64url");
+
+export function issuePersonToken(employee, now = Date.now()) {
+  const expires = now + TOKEN_TTL_MS;
+  return {
+    token: `person.${employee.id}.${expires}.${signPerson(employee.id, employee.passwordHash, expires)}`,
+    expiresAt: new Date(expires).toISOString(),
+    role: "staff",
+    employeeId: employee.id,
+  };
+}
+
+// The employee a personal token belongs to, or null.
+async function verifyPersonToken(token, now) {
+  const [kind, id, expires, signature, ...rest] = token.split(".");
+  if (kind !== "person" || rest.length > 0 || !/^[\w-]{1,40}$/.test(id ?? "") || !/^\d+$/.test(expires ?? "") || !signature) {
+    return null;
+  }
+  if (Number(expires) <= now) return null;
+  const employee = await prisma.employee.findUnique({ where: { id }, select: { id: true, name: true, passwordHash: true } });
+  if (!employee?.passwordHash) return null;
+  return safeEqual(signature, signPerson(id, employee.passwordHash, expires)) ? employee : null;
+}
+
+/* ---- who is asking ----------------------------------------------------- */
+
+// { role, employeeId, name } for this request, or null when sign-in is
+// needed. role is "admin" or "staff"; employeeId is set only for a personal
+// sign-in. With login switched off everyone is an admin.
+export async function viewerFromRequest(req, now = Date.now()) {
+  if (!authEnabled()) return { role: "admin", employeeId: null, name: null };
+  const token = tokenFromRequest(req);
+  if (typeof token !== "string") return null;
+  if (token.startsWith("person.")) {
+    const employee = await verifyPersonToken(token, now);
+    return employee ? { role: "staff", employeeId: employee.id, name: employee.name } : null;
+  }
+  const role = verifyToken(token, now);
+  return role ? { role, employeeId: null, name: null } : null;
+}
 
 // Everything behind this needs a valid token once login is switched on.
-// Sets req.role for the handlers.
-export function requireAuth(req, res, next) {
-  req.role = roleFromRequest(req);
-  if (req.role) return next();
-  res.status(401).json({ error: "Please sign in." });
+// Sets req.role ("admin" or "staff") and req.employeeId (a personal sign-in,
+// else null) for the handlers.
+export async function requireAuth(req, res, next) {
+  const viewer = await viewerFromRequest(req);
+  if (!viewer) return res.status(401).json({ error: "Please sign in." });
+  req.role = viewer.role;
+  req.employeeId = viewer.employeeId;
+  next();
 }
 
 export const ADMIN_ONLY_MESSAGE = "Only an admin can do this.";
