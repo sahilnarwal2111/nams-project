@@ -28,6 +28,11 @@ const passwordFor = (role) => (process.env[PASSWORD_ENV[role]] ?? "").trim();
 
 export const authEnabled = () => passwordFor("staff") !== "" || passwordFor("admin") !== "";
 
+// Which shared passwords exist on the server. The sign-in screen uses this to
+// say so plainly when no admin password has been set, instead of answering
+// "Wrong password" to every attempt.
+export const sharedSignIns = () => ({ admin: passwordFor("admin") !== "", office: passwordFor("staff") !== "" });
+
 const digest = (text) => crypto.createHash("sha256").update(text).digest();
 const signingKey = (role) => digest(`nk-consultancy-token-key:${role}:${passwordFor(role)}`);
 const sign = (role, expires) =>

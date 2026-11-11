@@ -8,23 +8,26 @@ import {
   passwordMatches,
   recordFailedLogin,
   roleForPassword,
+  sharedSignIns,
   viewerFromRequest,
 } from "../lib/auth.js";
 
 // Tells the frontend whether to show a sign-in screen and what the viewer may
 // see. Never returns 401. role is "admin", "staff" or null (not signed in);
 // with login switched off everyone is an admin. employeeId and name are set
-// for a personal sign-in. people lists who can sign in with their own
-// password, for the sign-in screen.
+// for a personal sign-in. For the sign-in screen: people lists every employee
+// and whether they have their own password yet, and methods says which shared
+// passwords exist on the server. Neither reveals a password.
 export async function getSession(req, res) {
   const required = authEnabled();
   const viewer = await viewerFromRequest(req);
   const people = required
-    ? await prisma.employee.findMany({
-        where: { passwordHash: { not: null } },
-        select: { id: true, name: true },
-        orderBy: { id: "asc" },
-      })
+    ? (
+        await prisma.employee.findMany({
+          select: { id: true, name: true, passwordHash: true },
+          orderBy: { id: "asc" },
+        })
+      ).map(({ id, name, passwordHash }) => ({ id, name, hasPassword: passwordHash !== null }))
     : [];
   res.json({
     required,
@@ -33,6 +36,7 @@ export async function getSession(req, res) {
     employeeId: viewer?.employeeId ?? null,
     name: viewer?.name ?? null,
     people,
+    methods: sharedSignIns(),
   });
 }
 

@@ -45,6 +45,18 @@ export function sortTasks(tasks, mode) {
   return sorted;
 }
 
+// How much work each person has: { [employeeId]: { open, done } }.
+export function workCounts(tasks) {
+  const counts = {};
+  for (const task of tasks) {
+    if (!task.assignee) continue;
+    const entry = (counts[task.assignee] ??= { open: 0, done: 0 });
+    if (task.status === "done") entry.done += 1;
+    else entry.open += 1;
+  }
+  return counts;
+}
+
 // Open work whose expected completion date is before today. Due today is not
 // overdue, and finished work never is. Dates are YYYY-MM-DD strings.
 export function isOverdue(task, today) {

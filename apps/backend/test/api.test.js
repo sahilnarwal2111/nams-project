@@ -744,6 +744,13 @@ const PASSWORD = "test-office-password";
 const authed = (path, token, options = {}) =>
   fetch(base + path, { ...options, headers: { ...options.headers, authorization: `Bearer ${token}` } });
 const signIn = async (password) => post("/api/auth/login", { password });
+// The part of a session reply that says who is asking. people and methods are
+// covered by their own tests.
+const who = async (res) => {
+  const { required, authenticated, role, employeeId, name } = await res.json();
+  return { required, authenticated, role, employeeId, name };
+};
+
 
 // Switches login on for one test and always switches it back off, because the
 // rest of this file expects an open API.
@@ -760,7 +767,7 @@ async function withLogin(fn) {
 
 test("with no APP_PASSWORD the API is open and the session says login is not required", async () => {
   assert.equal(process.env.APP_PASSWORD, undefined);
-  assert.deepEqual(await (await get("/api/auth/session")).json(), { required: false, authenticated: false, role: "admin", employeeId: null, name: null, people: [] });
+  assert.deepEqual(await who(await get("/api/auth/session")), { required: false, authenticated: false, role: "admin", employeeId: null, name: null });
   assert.equal((await get("/api/tasks")).status, 200);
   assert.equal((await signIn("anything")).status, 400);
 });
@@ -778,7 +785,7 @@ test("with APP_PASSWORD set, data endpoints need a token but health and session 
     assert.equal((await get("/api/clients/c1/payments")).status, 401);
     assert.equal((await post("/api/clients/c1/payments", { amount: 1 })).status, 401);
     assert.equal((await get("/api/health")).status, 200);
-    assert.deepEqual(await (await get("/api/auth/session")).json(), { required: true, authenticated: false, role: null, employeeId: null, name: null, people: [] });
+    assert.deepEqual(await who(await get("/api/auth/session")), { required: true, authenticated: false, role: null, employeeId: null, name: null });
   });
   assert.equal(await prisma.client.count({ where: { id: "c1" } }), 1, "an unauthenticated delete went through");
 });
@@ -793,7 +800,7 @@ test("the right password gives a token that opens the API", async () => {
 
     assert.equal((await authed("/api/tasks", token)).status, 200);
     assert.equal((await authed("/api/clients", token)).status, 200);
-    assert.deepEqual(await (await authed("/api/auth/session", token)).json(), { required: true, authenticated: true, role: "staff", employeeId: null, name: null, people: [] });
+    assert.deepEqual(await who(await authed("/api/auth/session", token)), { required: true, authenticated: true, role: "staff", employeeId: null, name: null });
   });
 });
 
@@ -1051,9 +1058,9 @@ test("each password signs in with its own role, and the session reports it", asy
   await withRoles(async ({ staff, admin, staffLogin, adminLogin }) => {
     assert.equal(staffLogin.role, "staff");
     assert.equal(adminLogin.role, "admin");
-    assert.deepEqual(await (await authed("/api/auth/session", staff)).json(), { required: true, authenticated: true, role: "staff", employeeId: null, name: null, people: [] });
-    assert.deepEqual(await (await authed("/api/auth/session", admin)).json(), { required: true, authenticated: true, role: "admin", employeeId: null, name: null, people: [] });
-    assert.deepEqual(await (await get("/api/auth/session")).json(), { required: true, authenticated: false, role: null, employeeId: null, name: null, people: [] });
+    assert.deepEqual(await who(await authed("/api/auth/session", staff)), { required: true, authenticated: true, role: "staff", employeeId: null, name: null });
+    assert.deepEqual(await who(await authed("/api/auth/session", admin)), { required: true, authenticated: true, role: "admin", employeeId: null, name: null });
+    assert.deepEqual(await who(await get("/api/auth/session")), { required: true, authenticated: false, role: null, employeeId: null, name: null });
   });
 });
 
@@ -1230,16 +1237,18 @@ test("an admin sets a personal password; it is stored hashed and never sent back
 
 test("the session names the person and lists who can sign in", async () => {
   await withPeople(async ({ ankit }) => {
-    assert.deepEqual(await (await authed("/api/auth/session", ankit)).json(), {
+    assert.deepEqual(await who(await authed("/api/auth/session", ankit)), {
       required: true,
       authenticated: true,
       role: "staff",
       employeeId: "e6",
       name: "Ankit",
-      people: [{ id: "e4", name: "Rajesh Kumar" }, { id: "e6", name: "Ankit" }],
     });
     const anon = await (await get("/api/auth/session")).json();
-    assert.deepEqual(anon.people.map((p) => p.id), ["e4", "e6"]);
+    assert.deepEqual(anon.people.map((p) => p.id), ["e1", "e2", "e3", "e4", "e5", "e6", "e7"], "every profile is listed");
+    assert.deepEqual(anon.people.filter((p) => p.hasPassword).map((p) => p.id), ["e4", "e6"]);
+    assert.deepEqual(anon.people.find((p) => p.id === "e6"), { id: "e6", name: "Ankit", hasPassword: true });
+    assert.deepEqual(anon.people.find((p) => p.id === "e1"), { id: "e1", name: "Narender Kumar", hasPassword: false });
     assert.ok(!JSON.stringify(anon).includes("scrypt"));
   });
 });
@@ -1424,4 +1433,37 @@ test("spaces or a line break around a password in the server settings are ignore
     delete process.env.ADMIN_PASSWORD;
     clearFailedLogins();
   }
+});
+
+// --- The session says which sign-ins exist, so the screen can explain itself ---
+
+test("the session reports which shared passwords are set on the server", async () => {
+  const methods = async () => (await (await get("/api/auth/session")).json()).methods;
+  assert.deepEqual(await methods(), { admin: false, office: false });
+  await withLogin(async () => {
+    assert.deepEqual(await methods(), { admin: false, office: true }, "only the office password: nobody can be admin");
+    process.env.ADMIN_PASSWORD = ADMIN_PASSWORD;
+    try {
+      assert.deepEqual(await methods(), { admin: true, office: true });
+      process.env.ADMIN_PASSWORD = "   ";
+      assert.deepEqual(await methods(), { admin: false, office: true }, "a blank value does not count");
+    } finally {
+      delete process.env.ADMIN_PASSWORD;
+    }
+  });
+  process.env.ADMIN_PASSWORD = ADMIN_PASSWORD;
+  try {
+    assert.deepEqual(await methods(), { admin: true, office: false });
+  } finally {
+    delete process.env.ADMIN_PASSWORD;
+  }
+});
+
+test("the session lists every profile once sign-in is on, with nobody ready until the admin sets passwords", async () => {
+  await withLogin(async () => {
+    const { people } = await (await get("/api/auth/session")).json();
+    assert.equal(people.length, 7);
+    assert.ok(people.every((p) => p.hasPassword === false));
+    for (const p of people) assert.deepEqual(Object.keys(p).sort(), ["hasPassword", "id", "name"]);
+  });
 });

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { filterTasks, sortTasks, isOverdue, SORT_MODES } from "../src/board.js";
+import { filterTasks, sortTasks, isOverdue, SORT_MODES, workCounts } from "../src/board.js";
 
 const tasks = [
   { id: "NK-101", title: "Topographic survey, Narwana layout", client: "Jind Infra Developers", priority: "high", status: "done", district: "Jind" },
@@ -70,4 +70,16 @@ test("isOverdue is true only for open work dated before today", () => {
   assert.equal(isOverdue({ status: "done", expectedCompletion: "2026-01-01" }, today), false);
   assert.equal(isOverdue({ status: "todo", expectedCompletion: null }, today), false);
   assert.equal(isOverdue({ status: "todo" }, today), false);
+});
+
+test("workCounts totals open and completed work per person", () => {
+  const counts = workCounts([
+    { assignee: "e6", status: "todo" },
+    { assignee: "e6", status: "inprogress" },
+    { assignee: "e6", status: "done" },
+    { assignee: "e4", status: "done" },
+    { status: "todo" },
+  ]);
+  assert.deepEqual(counts, { e6: { open: 2, done: 1 }, e4: { open: 0, done: 1 } });
+  assert.deepEqual(workCounts([]), {});
 });

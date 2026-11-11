@@ -6,15 +6,15 @@ import {
   clientToApi, clientFormError, paymentError, paymentPatchBody, parseRupees, nextLocalClientId,
   fetchSession, login, logout, onAuthLost,
   daysAgo, paymentPending, enquiryError,
-  fetchTeam, canEditTask, signInChoices, defaultSignInChoice, personalPasswordError, setEmployeePassword, clearEmployeePassword, sendEnquiry, fetchEnquiries, updateEnquiryStatus, deleteEnquiry,
+  fetchTeam, canEditTask, viewerLabel, signInChoices, defaultSignInChoice, personalPasswordError, setEmployeePassword, clearEmployeePassword, sendEnquiry, fetchEnquiries, updateEnquiryStatus, deleteEnquiry,
 } from "./api.js";
-import { filterTasks, sortTasks, isOverdue, SORT_MODES } from "./board.js";
+import { filterTasks, sortTasks, isOverdue, SORT_MODES, workCounts } from "./board.js";
 import { pageFromHash, hashForPage, anchorFromHash } from "./route.js";
 import {
   Ruler, Route, Building2, Droplets, Plane, Waves,
   Menu, X, ChevronRight, Clock, PhoneCall,
   Mail, Phone, MapPin, ArrowLeft,
-  ArrowRight, Filter, ChevronDown, Plus, Pencil, Trash2, CalendarDays, IndianRupee, Lock, LogOut, History, Search, CircleCheck, Send, MessageSquare, KeyRound, UserRound
+  ArrowRight, Filter, ChevronDown, Plus, Pencil, Trash2, CalendarDays, IndianRupee, Lock, LogOut, History, Search, CircleCheck, Send, MessageSquare, KeyRound, UserRound, Eye, Info
 } from "lucide-react";
 
 /* ---------------------------------------------------------------
@@ -461,6 +461,27 @@ function Landing({ setPage, onEnquiry }) {
   );
 }
 
+// A boxed explanation with an optional action, used where controls are hidden
+// because of how the viewer signed in.
+function AccessNote({ testId, icon: Icon = Info, title, children, actionLabel, onAction }) {
+  return (
+    <div data-testid={testId} role="note" style={{ background: "#EBF3FA", borderColor: C.blueLight, color: C.ink }} className="border rounded-md px-4 py-3 mb-5 flex flex-col sm:flex-row sm:items-center gap-3">
+      <div className="flex items-start gap-3 flex-1">
+        <Icon size={18} style={{ color: C.blue }} className="shrink-0 mt-0.5" />
+        <div className="f-body text-sm leading-relaxed">
+          <div className="font-semibold">{title}</div>
+          {children}
+        </div>
+      </div>
+      {onAction && (
+        <button onClick={onAction} style={{ background: C.navy, color: C.paper }} className="f-body text-xs font-semibold px-4 py-2 rounded shadow-sm hover:opacity-90 shrink-0 self-start sm:self-auto">
+          {actionLabel}
+        </button>
+      )}
+    </div>
+  );
+}
+
 /* ---------------------------------------------------------------
    WORK BOARD
 ------------------------------------------------------------------*/
@@ -780,7 +801,9 @@ function WorkForm({ task, employees, onSave, onDelete, onClose, isAdmin = true }
 // viewer: { isAdmin, employeeId }. An admin creates, edits, moves and deletes
 // any work; a person signed in by name edits and moves only their own; the
 // office sign-in only looks. The API enforces the same rules.
-function WorkBoard({ viewer = { isAdmin: true, employeeId: null } }) {
+// access (API mode with sign-in on): { adminConfigured, onSwitchSignIn,
+// onOpenTeam }, used to explain missing buttons and point at the fix.
+function WorkBoard({ viewer = { isAdmin: true, employeeId: null }, access = null }) {
   const useApi = hasApi();
   const [tasks, setTasks] = useState(useApi ? [] : INITIAL_TASKS);
   const [employees, setEmployees] = useState(useApi ? [] : EMPLOYEES);
@@ -880,11 +903,9 @@ function WorkBoard({ viewer = { isAdmin: true, employeeId: null } }) {
           <div>
             <div style={{ color: C.orangeDeep }} className="f-mono text-xs font-semibold tracking-wider uppercase mb-1">Task Operations</div>
             <h1 style={{ color: C.ink }} className="f-display text-2xl sm:text-3xl font-bold">Project Work Board</h1>
-            {!viewer.isAdmin && (
+            {!viewer.isAdmin && viewer.employeeId && (
               <p data-testid="board-access" style={{ color: C.steel }} className="f-body text-sm mt-1">
-                {viewer.employeeId
-                  ? "You can update and move the work assigned to you. An admin adds and assigns new work."
-                  : "View only. Sign in with your own name to update your work."}
+                You can update and move the work assigned to you. An admin adds and assigns new work.
               </p>
             )}
             {load.state === "ready" && viewer.isAdmin && (
@@ -906,6 +927,23 @@ function WorkBoard({ viewer = { isAdmin: true, employeeId: null } }) {
             ))}
           </div>
         </div>
+
+        {/* Why buttons are missing, and what to do about it */}
+        {!viewer.isAdmin && !viewer.employeeId && (
+          <AccessNote testId="board-access" icon={Eye} title="View only: you are signed in with the office password" actionLabel="Switch sign-in" onAction={access?.onSwitchSignIn}>
+            <div>The buttons to add, edit and move work are hidden for this sign-in. Sign in with the admin password to manage all work, or with your own name to update the work assigned to you.</div>
+            {access && !access.adminConfigured && (
+              <div data-testid="no-admin-note" style={{ color: C.orangeDeep }} className="font-semibold mt-1">
+                No admin password is set on the server yet. Add ADMIN_PASSWORD in the Render dashboard first.
+              </div>
+            )}
+          </AccessNote>
+        )}
+        {viewer.isAdmin && access && load.state === "ready" && employees.length > 0 && employees.every((e) => e.hasPassword === false) && (
+          <AccessNote testId="team-hint" icon={KeyRound} title="Nobody has their own sign-in yet" actionLabel="Open Team page" onAction={access.onOpenTeam}>
+            <div>Until you set a password for each person on the Team page, only you can move and edit work. Everyone else can only look.</div>
+          </AccessNote>
+        )}
 
         {load.state === "loading" && (
           <div style={{ borderColor: C.line, color: C.steel, background: C.card }} className="border rounded-md p-10 text-center f-body text-sm">
@@ -1737,9 +1775,11 @@ function Enquiries({ local, setLocal }) {
 }
 
 /* ---------------------------------------------------------------
-   TEAM (admin: personal passwords)
+   TEAM (a profile for each person; the admin sets their passwords)
 ------------------------------------------------------------------*/
-function TeamMember({ employee, busy, onSet, onClear }) {
+// canManage: the admin, who sets and removes passwords. Everyone else sees
+// the profile only. work is { open, done } for this person.
+function TeamMember({ employee, work, isYou, canManage, busy, onSet, onClear }) {
   const [mode, setMode] = useState("idle"); // idle | setting | removing
   const [password, setPassword] = useState("");
   const [error, setError] = useState(null);
@@ -1754,19 +1794,28 @@ function TeamMember({ employee, busy, onSet, onClear }) {
   };
   const remove = () => onClear(employee.id).then(() => setMode("idle")).catch((err) => setError(err.message));
   const smallBtn = "f-body text-xs font-semibold px-3 py-2 rounded disabled:opacity-50";
+  const knowsPassword = typeof employee.hasPassword === "boolean";
 
   return (
     <div data-testid="team-member" style={{ background: C.card, borderColor: C.line }} className="border rounded-md p-4 shadow-sm">
-      <div className="flex items-center gap-3 flex-wrap">
-        <div style={{ background: C.navy, color: C.paper }} className="w-9 h-9 rounded-full flex items-center justify-center f-mono text-xs font-bold shrink-0">{employee.initials}</div>
+      <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+        <div className="flex items-center gap-3 flex-1 min-w-0">
+        <div style={{ background: C.navy, color: C.paper }} className="w-10 h-10 rounded-full flex items-center justify-center f-mono text-xs font-bold shrink-0">{employee.initials}</div>
         <div className="min-w-0 flex-1">
-          <div style={{ color: C.ink }} className="f-body text-sm font-semibold">{employee.name}</div>
+          <div style={{ color: C.ink }} className="f-body text-sm font-semibold">
+            {employee.name}{isYou && <span style={{ color: C.orangeDeep }} className="f-mono text-[10px] font-bold uppercase tracking-wider ml-2">You</span>}
+          </div>
           <div style={{ color: C.steel }} className="f-body text-xs">{employee.role}</div>
+          <div data-testid="work-count" style={{ color: C.steel }} className="f-mono text-[11px] mt-1">{work.open} open · {work.done} completed</div>
         </div>
-        <span data-testid="password-state" style={employee.hasPassword ? { background: "#EEF3ED", color: C.green } : { background: "#F1EFEA", color: C.steel }} className="f-mono text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded">
-          {employee.hasPassword ? "Can sign in" : "No password"}
-        </span>
-        {mode === "idle" && (
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
+        {knowsPassword && (
+          <span data-testid="password-state" style={employee.hasPassword ? { background: "#EEF3ED", color: C.green } : { background: "#F1EFEA", color: C.steel }} className="f-mono text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded">
+            {employee.hasPassword ? "Can sign in" : "No password"}
+          </span>
+        )}
+        {canManage && mode === "idle" && (
           <div className="flex items-center gap-2">
             <button disabled={busy} onClick={() => { setMode("setting"); setError(null); }} style={{ background: C.navy, color: C.paper }} className={smallBtn}>
               {employee.hasPassword ? "Change password" : "Set password"}
@@ -1776,8 +1825,9 @@ function TeamMember({ employee, busy, onSet, onClear }) {
             )}
           </div>
         )}
+        </div>
       </div>
-      {mode === "setting" && (
+      {canManage && mode === "setting" && (
         <form onSubmit={save} aria-label={`Password for ${employee.name}`} className="mt-3 flex flex-col sm:flex-row gap-2">
           <input name="password" type="text" autoComplete="off" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="New password, at least 6 characters" style={{ borderColor: C.line, color: C.ink }} className={INPUT_CLASS} autoFocus />
           <div className="flex gap-2 shrink-0">
@@ -1786,7 +1836,7 @@ function TeamMember({ employee, busy, onSet, onClear }) {
           </div>
         </form>
       )}
-      {mode === "removing" && (
+      {canManage && mode === "removing" && (
         <div className="mt-3 flex items-center gap-2 flex-wrap">
           <span style={{ color: C.ink }} className="f-body text-sm">Remove {employee.name}'s password? They will be signed out.</span>
           <button disabled={busy} onClick={remove} style={{ background: C.orangeDeep, color: "#FFFFFF" }} className={smallBtn}>Yes, remove</button>
@@ -1798,16 +1848,24 @@ function TeamMember({ employee, busy, onSet, onClear }) {
   );
 }
 
-function Team() {
+// Everyone signed in sees the profiles. Only the admin (viewer.isAdmin) sets
+// passwords. access is as on the Work Board.
+function Team({ viewer, access }) {
   const [employees, setEmployees] = useState([]);
+  const [counts, setCounts] = useState({});
   const [load, setLoad] = useState({ state: "loading" });
   const [attempt, setAttempt] = useState(0);
   const [saving, setSaving] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
-    fetchEmployees()
-      .then((list) => { if (!cancelled) { setEmployees(list); setLoad({ state: "ready" }); } })
+    Promise.all([fetchEmployees(), fetchTasks()])
+      .then(([list, tasks]) => {
+        if (cancelled) return;
+        setEmployees(list);
+        setCounts(workCounts(tasks));
+        setLoad({ state: "ready" });
+      })
       .catch((err) => { if (!cancelled) setLoad({ state: "error", message: err.message }); });
     return () => { cancelled = true; };
   }, [attempt]);
@@ -1823,11 +1881,23 @@ function Team() {
   return (
     <div style={{ background: C.paper }} className="w-full min-h-[calc(100vh-4rem)]">
       <div className="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8 py-8 sm:py-12">
-        <div style={{ color: C.orangeDeep }} className="f-mono text-xs font-semibold tracking-wider uppercase mb-1">Admin</div>
-        <h1 style={{ color: C.ink }} className="f-display text-2xl sm:text-3xl font-bold flex items-center gap-2"><KeyRound size={24} /> Team sign-in</h1>
+        <div style={{ color: C.orangeDeep }} className="f-mono text-xs font-semibold tracking-wider uppercase mb-1">Team</div>
+        <h1 style={{ color: C.ink }} className="f-display text-2xl sm:text-3xl font-bold flex items-center gap-2"><UserRound size={24} /> Team profiles</h1>
         <p style={{ color: C.steel }} className="f-body text-sm mt-1 mb-6">
-          Give each person their own password. They pick their name on the sign-in screen and can then update and move the work assigned to them. Tell them the password in person.
+          {viewer.isAdmin
+            ? "Each person has a profile. Give them a password here and tell them in person. They then pick their name on the sign-in screen and can update and move the work assigned to them."
+            : "Each person has a profile. Once the admin gives you a password, pick your name on the sign-in screen to update and move the work assigned to you."}
         </p>
+        {!viewer.isAdmin && (
+          <AccessNote testId="team-access" icon={Eye} title="Only the admin can set or change passwords" actionLabel={viewer.employeeId ? undefined : "Switch sign-in"} onAction={viewer.employeeId ? undefined : access?.onSwitchSignIn}>
+            <div>Sign in with the admin password to manage these profiles.</div>
+            {access && !access.adminConfigured && (
+              <div data-testid="no-admin-note" style={{ color: C.orangeDeep }} className="font-semibold mt-1">
+                No admin password is set on the server yet. Add ADMIN_PASSWORD in the Render dashboard first.
+              </div>
+            )}
+          </AccessNote>
+        )}
         {load.state === "loading" && <div style={{ borderColor: C.line, color: C.steel, background: C.card }} className="border rounded-md p-10 text-center f-body text-sm">Loading team…</div>}
         {load.state === "error" && (
           <div style={{ borderColor: C.orangeDeep, background: "#FDF0EA" }} className="border rounded-md p-6 text-center">
@@ -1837,7 +1907,18 @@ function Team() {
         )}
         {load.state === "ready" && (
           <div className="space-y-3">
-            {employees.map((e) => <TeamMember key={e.id} employee={e} busy={saving === e.id} onSet={onSet} onClear={onClear} />)}
+            {employees.map((e) => (
+              <TeamMember
+                key={e.id}
+                employee={e}
+                work={counts[e.id] ?? { open: 0, done: 0 }}
+                isYou={viewer.employeeId === e.id}
+                canManage={viewer.isAdmin}
+                busy={saving === e.id}
+                onSet={onSet}
+                onClear={onClear}
+              />
+            ))}
           </div>
         )}
       </div>
@@ -1859,7 +1940,9 @@ function useStaffSession() {
   // sign-in; people are offered on the sign-in screen. Without an API there is
   // no sign-in and everything shows.
   const [session, setSession] = useState(
-    useApi ? { state: "checking", ...signedOut, people: [] } : { state: "open", role: "admin", employeeId: null, name: null, people: [] }
+    useApi
+      ? { state: "checking", ...signedOut, people: [], methods: { admin: true, office: true } }
+      : { state: "open", role: "admin", employeeId: null, name: null, people: [], methods: { admin: true, office: true } }
   );
   const [attempt, setAttempt] = useState(0);
 
@@ -1868,7 +1951,7 @@ function useStaffSession() {
     let cancelled = false;
     fetchSession()
       .then((found) => { if (!cancelled) setSession(found); })
-      .catch((err) => { if (!cancelled) setSession({ state: "error", ...signedOut, people: [], message: err.message }); });
+      .catch((err) => { if (!cancelled) setSession({ state: "error", ...signedOut, people: [], methods: { admin: true, office: true }, message: err.message }); });
     // Signed out by the server: ask again, so the sign-in screen has the
     // current list of people.
     const stopListening = onAuthLost(() => {
@@ -1897,18 +1980,24 @@ function useStaffSession() {
 const SIGN_IN_AS_KEY = "nk.signInAs";
 const rememberedChoice = () => { try { return localStorage.getItem(SIGN_IN_AS_KEY); } catch { return null; } };
 
-function SignIn({ people, onSignIn }) {
+// methods: which shared passwords exist on the server. people: every profile,
+// with hasPassword false until the admin sets one.
+function SignIn({ people, methods, onSignIn }) {
+  const choices = signInChoices(people, methods);
   const [as, setAs] = useState(() => defaultSignInChoice(people, rememberedChoice()));
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
+  const chosen = choices.find((c) => c.value === as) ?? choices[0];
+  const noteStyle = { borderColor: C.blueLight, background: "#EBF3FA", color: C.ink };
 
   const submit = (e) => {
     e.preventDefault();
+    if (!chosen.ready) return;
     setBusy(true);
     setError(null);
-    try { localStorage.setItem(SIGN_IN_AS_KEY, as); } catch { /* storage blocked */ }
-    onSignIn(password, as).catch((err) => { setError(err.message); setBusy(false); });
+    try { localStorage.setItem(SIGN_IN_AS_KEY, chosen.value); } catch { /* storage blocked */ }
+    onSignIn(password, chosen.value).catch((err) => { setError(err.message); setBusy(false); });
   };
 
   return (
@@ -1921,35 +2010,41 @@ function SignIn({ people, onSignIn }) {
       <p style={{ color: C.steel }} className="f-body text-sm mb-5">The work board and receivables are for NK Consultancy staff.</p>
       <div className="mb-3">
         <Field label="Sign in as" required>
-          <select name="as" value={as} onChange={(e) => setAs(e.target.value)} style={{ borderColor: C.line, color: C.ink }} className={INPUT_CLASS}>
-            {signInChoices(people).map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
+          <select name="as" value={chosen.value} onChange={(e) => { setAs(e.target.value); setError(null); }} style={{ borderColor: C.line, color: C.ink }} className={INPUT_CLASS}>
+            {choices.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
           </select>
         </Field>
+        {chosen.value === "shared" && methods.admin && methods.office && (
+          <p style={{ color: C.steel }} className="f-body text-xs mt-1.5">The admin password manages all work and shows amounts. The office password can only view.</p>
+        )}
       </div>
-      <Field label="Password" required>
-        <input
-          name="password" type="password" autoComplete="current-password" value={password}
-          onChange={(e) => setPassword(e.target.value)} required autoFocus
-          style={{ borderColor: C.line, color: C.ink }} className={INPUT_CLASS}
-        />
-      </Field>
+      {chosen.ready ? (
+        <Field label="Password" required>
+          <input
+            name="password" type="password" autoComplete="current-password" value={password}
+            onChange={(e) => setPassword(e.target.value)} required autoFocus
+            style={{ borderColor: C.line, color: C.ink }} className={INPUT_CLASS}
+          />
+        </Field>
+      ) : (
+        <div data-testid="no-password-note" role="note" style={noteStyle} className="border rounded-md px-3 py-2 f-body text-sm">
+          {chosen.name} does not have a password yet. The admin sets it on the Team page, and then {chosen.name} can sign in here.
+        </div>
+      )}
+      {!methods.admin && (
+        <div data-testid="no-admin-note" role="note" style={{ borderColor: C.orangeDeep, background: "#FDF0EA", color: C.orangeDeep }} className="border rounded-md px-3 py-2 mt-3 f-body text-sm">
+          No admin password is set on the server yet, so nobody can add or move work, set up profiles or see amounts. Add ADMIN_PASSWORD in the Render dashboard.
+        </div>
+      )}
       {error && (
         <div role="alert" style={{ borderColor: C.orangeDeep, background: "#FDF0EA", color: C.orangeDeep }} className="border rounded-md px-3 py-2 mt-3 f-body text-sm">
           {error}
         </div>
       )}
-      <button type="submit" disabled={busy} style={{ background: C.orange, color: C.paper }} className="f-body text-sm font-semibold w-full px-5 py-2.5 mt-4 rounded shadow-sm hover:opacity-90 disabled:opacity-60">
+      <button type="submit" disabled={busy || !chosen.ready} style={{ background: C.orange, color: C.paper }} className="f-body text-sm font-semibold w-full px-5 py-2.5 mt-4 rounded shadow-sm hover:opacity-90 disabled:opacity-60">
         {busy ? "Signing in…" : "Sign in"}
       </button>
     </form>
-  );
-}
-
-function AdminOnlyNotice() {
-  return (
-    <div style={{ background: C.paper }} className="min-h-[calc(100vh-4rem)] py-16 px-4 flex justify-center">
-      <p style={{ color: C.steel }} className="f-body text-sm">This page is for the admin.</p>
-    </div>
   );
 }
 
@@ -1960,7 +2055,7 @@ function StaffOnly({ staff, children }) {
 
   return (
     <div style={{ background: C.paper }} className="min-h-[calc(100vh-4rem)] grid-bg py-10 sm:py-16 px-4 flex items-start justify-center">
-      {session.state === "login" && <SignIn people={session.people} onSignIn={signIn} />}
+      {session.state === "login" && <SignIn people={session.people} methods={session.methods} onSignIn={signIn} />}
       {session.state === "checking" && (
         <div style={{ borderColor: C.line, color: C.steel, background: C.card }} className="w-full max-w-sm border rounded-md p-8 text-center f-body text-sm">
           Checking access…
@@ -2012,6 +2107,11 @@ export default function App() {
     window.location.hash = hashForPage(next);
   };
   const staff = useStaffSession();
+  const signedIn = staff.session.state === "signedIn";
+  // With sign-in on, the pages can explain hidden buttons and offer the fix.
+  const access = signedIn
+    ? { adminConfigured: staff.session.methods.admin, onSwitchSignIn: staff.signOut, onOpenTeam: () => setPage("team") }
+    : null;
   // Mock mode only: enquiries live here so the landing page form and the
   // Enquiries page share one list.
   const [localEnquiries, setLocalEnquiries] = useState(INITIAL_ENQUIRIES);
@@ -2026,15 +2126,15 @@ export default function App() {
       <TopNav
         page={page}
         setPage={setPage}
-        onSignOut={staff.session.state === "signedIn" ? staff.signOut : null}
-        userName={staff.session.name ?? (staff.session.state === "signedIn" ? (staff.isAdmin ? "Admin" : "Office") : null)}
-        showTeam={hasApi() && staff.isAdmin}
+        onSignOut={signedIn ? staff.signOut : null}
+        userName={signedIn ? viewerLabel(staff.session) : null}
+        showTeam={hasApi() && (signedIn || staff.session.state === "open")}
       />
       <main>
         {page === "home" && <Landing setPage={setPage} onEnquiry={hasApi() ? sendEnquiry : sendLocalEnquiry} />}
-        {page === "work" && <StaffOnly staff={staff}><WorkBoard key={`${staff.session.role}-${staff.session.employeeId}`} viewer={staff.viewer} /></StaffOnly>}
+        {page === "work" && <StaffOnly staff={staff}><WorkBoard key={`${staff.session.role}-${staff.session.employeeId}`} viewer={staff.viewer} access={access} /></StaffOnly>}
         {page === "payments" && <StaffOnly staff={staff}><Payments key={staff.session.role} isAdmin={staff.isAdmin} /></StaffOnly>}
-        {page === "team" && <StaffOnly staff={staff}>{staff.isAdmin ? <Team /> : <AdminOnlyNotice />}</StaffOnly>}
+        {page === "team" && <StaffOnly staff={staff}><Team key={`${staff.session.role}-${staff.session.employeeId}`} viewer={staff.viewer} access={access} /></StaffOnly>}
         {page === "enquiries" && <StaffOnly staff={staff}><Enquiries local={localEnquiries} setLocal={setLocalEnquiries} /></StaffOnly>}
       </main>
     </div>
