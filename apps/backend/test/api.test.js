@@ -851,3 +851,173 @@ test("repeated wrong passwords are locked out, even with the right one afterward
     assert.equal((await signIn(PASSWORD)).status, 200);
   });
 });
+
+// --- Enquiries from the public landing page ---
+
+import { enquiryLimit, MAX_ENQUIRIES_PER_HOUR } from "../src/controllers/enquiries.controller.js";
+
+const del = (path) => fetch(base + path, { method: "DELETE" });
+const ENQ_NAME = "Test Enquirer (api.test)";
+// Removes what these tests stored and resets the hourly limit between tests.
+async function cleanEnquiries() {
+  await prisma.enquiry.deleteMany({ where: { name: { startsWith: "Test Enquirer" } } });
+  enquiryLimit.reset();
+}
+
+test("POST /api/enquiries stores a trimmed enquiry as new and acknowledges without echoing it", async () => {
+  await cleanEnquiries();
+  try {
+    const before = Date.now();
+    const res = await post("/api/enquiries", {
+      name: `  ${ENQ_NAME}  `,
+      phone: " +91 98765-43210 ",
+      message: "  Need a plot survey in Safidon  ",
+      status: "closed",
+      id: 999999,
+      createdAt: "2000-01-01T00:00:00.000Z",
+    });
+    assert.equal(res.status, 201);
+    assert.deepEqual(await res.json(), { received: true });
+
+    const rows = await prisma.enquiry.findMany({ where: { name: ENQ_NAME } });
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].phone, "+91 98765-43210");
+    assert.equal(rows[0].message, "Need a plot survey in Safidon");
+    assert.equal(rows[0].status, "new", "the visitor cannot choose the status");
+    assert.notEqual(rows[0].id, 999999);
+    assert.ok(rows[0].createdAt.getTime() >= before - 5000, "the visitor cannot choose the date");
+  } finally {
+    await cleanEnquiries();
+  }
+});
+
+test("POST /api/enquiries accepts a missing or blank message", async () => {
+  await cleanEnquiries();
+  try {
+    assert.equal((await post("/api/enquiries", { name: ENQ_NAME, phone: "9876543210" })).status, 201);
+    assert.equal((await post("/api/enquiries", { name: ENQ_NAME, phone: "9876543210", message: "   " })).status, 201);
+    const rows = await prisma.enquiry.findMany({ where: { name: ENQ_NAME } });
+    assert.deepEqual(rows.map((r) => r.message), [null, null]);
+  } finally {
+    await cleanEnquiries();
+  }
+});
+
+test("POST /api/enquiries rejects bad input with 400 and stores nothing", async () => {
+  await cleanEnquiries();
+  const count = await prisma.enquiry.count();
+  const bad = [
+    {},
+    { phone: "9876543210" },
+    { name: "   ", phone: "9876543210" },
+    { name: 42, phone: "9876543210" },
+    { name: "Test Enquirer " + "x".repeat(100), phone: "9876543210" },
+    { name: ENQ_NAME },
+    { name: ENQ_NAME, phone: "12345" },
+    { name: ENQ_NAME, phone: "call me maybe" },
+    { name: ENQ_NAME, phone: "98765432109876543210" },
+    { name: ENQ_NAME, phone: 9876543210 },
+    { name: ENQ_NAME, phone: "9876543210", message: 7 },
+    { name: ENQ_NAME, phone: "9876543210", message: "x".repeat(1001) },
+  ];
+  for (const body of bad) {
+    const res = await post("/api/enquiries", body);
+    assert.equal(res.status, 400, JSON.stringify(body).slice(0, 80));
+    assert.equal(typeof (await res.json()).error, "string");
+  }
+  assert.equal(await prisma.enquiry.count(), count);
+  // Invalid attempts do not use up the hourly allowance.
+  try {
+    assert.equal((await post("/api/enquiries", { name: ENQ_NAME, phone: "9876543210" })).status, 201);
+  } finally {
+    await cleanEnquiries();
+  }
+});
+
+test("POST /api/enquiries quietly drops a submission that fills the hidden field", async () => {
+  await cleanEnquiries();
+  const res = await post("/api/enquiries", { name: ENQ_NAME, phone: "9876543210", website: "http://spam.example" });
+  assert.equal(res.status, 201);
+  assert.deepEqual(await res.json(), { received: true });
+  assert.equal(await prisma.enquiry.count({ where: { name: ENQ_NAME } }), 0);
+});
+
+test("POST /api/enquiries allows a few per hour from one address, then answers 429", async () => {
+  await cleanEnquiries();
+  try {
+    for (let i = 0; i < MAX_ENQUIRIES_PER_HOUR; i += 1) {
+      assert.equal((await post("/api/enquiries", { name: ENQ_NAME, phone: "9876543210" })).status, 201);
+    }
+    const res = await post("/api/enquiries", { name: ENQ_NAME, phone: "9876543210" });
+    assert.equal(res.status, 429);
+    assert.match((await res.json()).error, /try again/i);
+    assert.equal(await prisma.enquiry.count({ where: { name: ENQ_NAME } }), MAX_ENQUIRIES_PER_HOUR);
+  } finally {
+    await cleanEnquiries();
+  }
+});
+
+test("GET, PATCH and DELETE /api/enquiries manage an enquiry", async () => {
+  await cleanEnquiries();
+  try {
+    await post("/api/enquiries", { name: ENQ_NAME, phone: "9876543210", message: "first" });
+    await post("/api/enquiries", { name: `${ENQ_NAME} 2`, phone: "9876500000" });
+
+    const list = await (await get("/api/enquiries")).json();
+    const mine = list.filter((e) => e.name.startsWith("Test Enquirer"));
+    assert.deepEqual(mine.map((e) => e.name), [`${ENQ_NAME} 2`, ENQ_NAME], "newest first");
+    assert.deepEqual(Object.keys(mine[1]).sort(), ["createdAt", "id", "message", "name", "phone", "status"]);
+    const { id } = mine[1];
+
+    const updated = await patch(`/api/enquiries/${id}`, { status: "contacted", name: "ignored" });
+    assert.equal(updated.status, 200);
+    const body = await updated.json();
+    assert.equal(body.status, "contacted");
+    assert.equal(body.name, ENQ_NAME, "only the status can change");
+
+    for (const bad of [{}, { status: "done" }, { status: null }, { status: "New" }]) {
+      assert.equal((await patch(`/api/enquiries/${id}`, bad)).status, 400, JSON.stringify(bad));
+    }
+    assert.equal((await prisma.enquiry.findUnique({ where: { id } })).status, "contacted");
+
+    assert.equal((await del(`/api/enquiries/${id}`)).status, 204);
+    assert.equal(await prisma.enquiry.findUnique({ where: { id } }), null);
+    assert.equal((await del(`/api/enquiries/${id}`)).status, 404);
+    assert.equal((await patch(`/api/enquiries/${id}`, { status: "closed" })).status, 404);
+    for (const odd of ["abc", "1e3", "-1", "99999999999999999999"]) {
+      assert.equal((await patch(`/api/enquiries/${odd}`, { status: "closed" })).status, 404, odd);
+      assert.equal((await del(`/api/enquiries/${odd}`)).status, 404, odd);
+    }
+  } finally {
+    await cleanEnquiries();
+  }
+});
+
+test("with login on, anyone can send an enquiry but only staff can read or change them", async () => {
+  await cleanEnquiries();
+  try {
+    await withLogin(async () => {
+      assert.equal((await post("/api/enquiries", { name: ENQ_NAME, phone: "9876543210" })).status, 201);
+      const { id } = await prisma.enquiry.findFirst({ where: { name: ENQ_NAME } });
+
+      assert.equal((await get("/api/enquiries")).status, 401);
+      assert.equal((await patch(`/api/enquiries/${id}`, { status: "closed" })).status, 401);
+      assert.equal((await del(`/api/enquiries/${id}`)).status, 401);
+      assert.equal((await prisma.enquiry.findUnique({ where: { id } })).status, "new");
+
+      const { token } = await (await signIn(PASSWORD)).json();
+      const list = await authed("/api/enquiries", token);
+      assert.equal(list.status, 200);
+      assert.ok((await list.json()).some((e) => e.id === id));
+      const closed = await authed(`/api/enquiries/${id}`, token, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ status: "closed" }),
+      });
+      assert.equal(closed.status, 200);
+      assert.equal((await authed(`/api/enquiries/${id}`, token, { method: "DELETE" })).status, 204);
+    });
+  } finally {
+    await cleanEnquiries();
+  }
+});

@@ -4,6 +4,7 @@ import { employeesRouter } from "./routes/employees.routes.js";
 import { tasksRouter } from "./routes/tasks.routes.js";
 import { clientsRouter } from "./routes/clients.routes.js";
 import { authRouter } from "./routes/auth.routes.js";
+import { enquiriesRouter } from "./routes/enquiries.routes.js";
 import { requireAuth } from "./lib/auth.js";
 
 export const app = express();
@@ -34,6 +35,8 @@ app.use("/api/auth", authRouter);
 app.use("/api/employees", requireAuth, employeesRouter);
 app.use("/api/tasks", requireAuth, tasksRouter);
 app.use("/api/clients", requireAuth, clientsRouter);
+// Sending an enquiry is public; the router guards the staff-only routes itself.
+app.use("/api/enquiries", enquiriesRouter);
 
 // eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {

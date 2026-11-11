@@ -1,6 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  daysAgo,
+  enquiryError,
+  enquiryToApi,
+  enquiryFromApi,
   taskFromApi,
   tasksFromApi,
   employeeFromApi,
@@ -305,4 +309,45 @@ test("taskFromApi shows completedAt as a local day and leaves createdAt as a tim
   assert.equal(t.completedAt, "2026-11-11");
   assert.equal(t.createdAt, "2026-11-01T04:00:00.000Z");
   assert.equal(taskFromApi({ ...apiTask, completedAt: null }).completedAt, null);
+});
+
+test("enquiryError asks for a name and a plausible phone number", () => {
+  const ok = { name: "Ramesh", phone: "+91 98765-43210", message: "" };
+  assert.equal(enquiryError(ok), null);
+  assert.equal(enquiryError({ ...ok, phone: "(01681) 245678" }), null);
+  assert.match(enquiryError({ ...ok, name: "   " }), /name/i);
+  assert.match(enquiryError({ ...ok, name: "x".repeat(101) }), /100/);
+  for (const phone of ["", "12345", "call me", "98765432109876543210", "98765 4321x"]) {
+    assert.match(enquiryError({ ...ok, phone }), /phone/i, phone);
+  }
+  assert.match(enquiryError({ ...ok, message: "x".repeat(1001) }), /1000/);
+  assert.equal(enquiryError({ ...ok, message: "x".repeat(1000) }), null);
+});
+
+test("enquiryToApi trims, sends a blank message as null and passes the hidden field only when filled", () => {
+  assert.deepEqual(enquiryToApi({ name: " Ramesh ", phone: " 9876543210 ", message: "  " }), { name: "Ramesh", phone: "9876543210", message: null });
+  assert.deepEqual(enquiryToApi({ name: "Ramesh", phone: "9876543210", message: " Plot survey ", website: "" }), { name: "Ramesh", phone: "9876543210", message: "Plot survey" });
+  assert.equal(enquiryToApi({ name: "Bot", phone: "9876543210", message: "", website: "http://x" }).website, "http://x");
+});
+
+test("enquiryFromApi shows the arrival time as the local day", () => {
+  const justAfterMidnight = new Date(2026, 10, 11, 0, 30).toISOString();
+  const e = enquiryFromApi({ id: 3, name: "Ramesh", phone: "9876543210", message: null, status: "new", createdAt: justAfterMidnight });
+  assert.equal(e.createdAt, "2026-11-11");
+  assert.equal(e.status, "new");
+});
+
+test("daysAgo counts calendar days, whatever the time of day", () => {
+  assert.equal(daysAgo("2026-11-11", "2026-11-11"), "Today");
+  assert.equal(daysAgo("2026-11-10", "2026-11-11"), "1 day ago");
+  assert.equal(daysAgo("2026-11-04", "2026-11-11"), "7 days ago");
+  assert.equal(daysAgo("2026-10-31", "2026-11-01"), "1 day ago");
+  assert.equal(daysAgo("2026-11-12", "2026-11-11"), "Today", "a future day is not negative");
+});
+
+test("daysAgo says Today for today's date late in the evening", (t) => {
+  // The old version rounded hours since midnight, so after midday today read as "1 day ago".
+  t.mock.timers.enable({ apis: ["Date"], now: new Date(2026, 10, 11, 21, 45) });
+  assert.equal(daysAgo("2026-11-11"), "Today");
+  assert.equal(daysAgo("2026-11-10"), "1 day ago");
 });
