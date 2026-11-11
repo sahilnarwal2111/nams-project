@@ -67,7 +67,7 @@ apps/backend/
   test/api.test.js         node:test suite hitting the real app over HTTP
 ```
 
-Endpoints today: `GET /api/health`, `GET /api/employees`, `GET /api/tasks`, `GET /api/tasks/:id` (404 if unknown), `PATCH /api/tasks/:id` (body `{ status }`), `GET /api/clients`, `PATCH /api/clients/:id` (logs a call: sets `lastCall` to now).
+Endpoints today: `GET /api/health`, `GET /api/employees`, `GET /api/tasks`, `GET /api/tasks/:id` (404 if unknown), `POST /api/tasks` (body `{ title, client, assigneeId, priority, status? }`; `status` defaults to `todo`; id generated as highest `NK-###` + 1; 201 with the task, 400 `{ error }` on missing/empty fields, invalid `priority`/`status`, or unknown `assigneeId`), `PATCH /api/tasks/:id` (body `{ status }`), `GET /api/clients`, `PATCH /api/clients/:id` (logs a call: sets `lastCall` to now).
 
 Design decisions to preserve:
 
