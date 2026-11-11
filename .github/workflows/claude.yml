@@ -61,7 +61,11 @@ jobs:
 
       - uses: anthropics/claude-code-action@v1
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Billed to the owner's Claude subscription. Generate with
+          # `claude setup-token` and store as the CLAUDE_CODE_OAUTH_TOKEN secret.
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Show Claude's full output in the job log so failures are diagnosable.
+          show_full_output: true
           claude_args: |
             --allowedTools "Bash(npm:*),Bash(npx:*),Bash(node:*),Bash(git:*),Bash(curl:*),Bash(cat:*),Bash(ls:*),Bash(grep:*),Bash(find:*),Bash(sed:*),Read,Edit,Write,Glob,Grep"
             --max-turns 60
