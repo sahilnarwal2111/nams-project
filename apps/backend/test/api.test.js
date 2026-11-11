@@ -585,6 +585,63 @@ test("DELETE /api/clients/:id returns 404 for an unknown client", async () => {
   assert.equal(await clientCount(), n);
 });
 
+/* ---- task timestamps --------------------------------------------- */
+
+test("a new task records when it was created and is not completed", async () => {
+  let createdId;
+  try {
+    const t0 = Date.now();
+    const task = await (await post("/api/tasks", validTask)).json();
+    createdId = task.id;
+    assert.ok(Date.parse(task.createdAt) >= t0 - 1000 && Date.parse(task.createdAt) <= Date.now() + 1000);
+    assert.equal(task.completedAt, null);
+  } finally {
+    if (createdId) await prisma.task.deleteMany({ where: { id: createdId } });
+  }
+});
+
+test("completedAt is stamped on reaching done, kept while done, and cleared when moved back", async () => {
+  let createdId;
+  try {
+    const task = await (await post("/api/tasks", validTask)).json();
+    createdId = task.id;
+    const move = async (body) => (await patch(`/api/tasks/${task.id}`, body)).json();
+
+    assert.equal((await move({ status: "inprogress" })).completedAt, null);
+
+    const t0 = Date.now();
+    const done = await move({ status: "done" });
+    assert.ok(Date.parse(done.completedAt) >= t0 - 1000);
+    assert.equal(done.createdAt, task.createdAt, "createdAt never changes");
+
+    const edited = await move({ title: "Edited while done" });
+    assert.equal(edited.completedAt, done.completedAt, "an unrelated edit keeps the completion time");
+    const again = await move({ status: "done" });
+    assert.equal(again.completedAt, done.completedAt, "saving done again keeps the first completion time");
+
+    assert.equal((await move({ status: "todo" })).completedAt, null);
+  } finally {
+    if (createdId) await prisma.task.deleteMany({ where: { id: createdId } });
+  }
+});
+
+test("a task created as done is completed at creation, and clients cannot set the timestamps", async () => {
+  let createdId;
+  try {
+    const res = await post("/api/tasks", { ...validTask, status: "done", createdAt: "2001-01-01", completedAt: "2001-01-02" });
+    const task = await res.json();
+    createdId = task.id;
+    assert.equal(task.completedAt, task.createdAt);
+    assert.notEqual(new Date(task.createdAt).getFullYear(), 2001);
+
+    const patched = await (await patch(`/api/tasks/${task.id}`, { title: "x", createdAt: "2001-01-01", completedAt: null })).json();
+    assert.equal(patched.createdAt, task.createdAt);
+    assert.equal(patched.completedAt, task.completedAt);
+  } finally {
+    if (createdId) await prisma.task.deleteMany({ where: { id: createdId } });
+  }
+});
+
 /* ---- payments ---------------------------------------------------- */
 
 const pay = (id, body) => post(`/api/clients/${id}/payments`, body);

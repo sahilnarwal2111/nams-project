@@ -89,11 +89,14 @@ export async function createTask(req, res) {
   const employee = await prisma.employee.findUnique({ where: { id: assigneeId } });
   if (!employee) return res.status(400).json({ error: `assigneeId ${assigneeId} is not an existing employee` });
 
+  const now = new Date();
+  const stamps = { createdAt: now, completedAt: status === "done" ? now : null };
+
   // Retry if a concurrent request grabbed the same id (unique violation).
   for (let attempt = 0; attempt < 5; attempt++) {
     try {
       const task = await prisma.task.create({
-        data: { id: await nextTaskId(), title: title.trim(), client: client.trim(), status, priority, assigneeId, ...details.data },
+        data: { id: await nextTaskId(), title: title.trim(), client: client.trim(), status, priority, assigneeId, ...details.data, ...stamps },
       });
       return res.status(201).json(task);
     } catch (err) {
@@ -154,6 +157,15 @@ export async function updateTask(req, res) {
   if ("assigneeId" in data) {
     const employee = await prisma.employee.findUnique({ where: { id: data.assigneeId } });
     if (!employee) return res.status(400).json({ error: `assigneeId ${data.assigneeId} is not an existing employee` });
+  }
+
+  // completedAt follows the status: stamped when a task first reaches "done",
+  // kept while it stays there, cleared when it is moved back.
+  if ("status" in data) {
+    const existing = await prisma.task.findUnique({ where: { id }, select: { status: true } });
+    if (!existing) return res.status(404).json({ error: `Task ${id} not found` });
+    if (data.status !== "done") data.completedAt = null;
+    else if (existing.status !== "done") data.completedAt = new Date();
   }
 
   try {

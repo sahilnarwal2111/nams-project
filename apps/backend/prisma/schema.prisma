@@ -42,6 +42,12 @@ model Task {
   details            String?
   // A calendar date with no time: stored as midnight UTC.
   expectedCompletion DateTime?
+
+  // When the task was created through the API, and when it last moved to
+  // "done" (cleared if it is moved back). Null on tasks that predate these
+  // columns: their real dates are unknown.
+  createdAt   DateTime?
+  completedAt DateTime?
 }
 
 model Client {

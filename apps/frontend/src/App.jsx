@@ -6,11 +6,12 @@ import {
   clientToApi, clientFormError, paymentError, paymentPatchBody, parseRupees, nextLocalClientId,
   fetchSession, login, logout, onAuthLost,
 } from "./api.js";
+import { filterTasks, sortTasks, isOverdue, SORT_MODES } from "./board.js";
 import {
   Ruler, Route, Building2, Droplets, Plane, Waves,
   Menu, X, ChevronRight, Clock, PhoneCall,
   Mail, Phone, MapPin, ArrowLeft,
-  ArrowRight, Filter, ChevronDown, Plus, Pencil, Trash2, CalendarDays, IndianRupee, Lock, LogOut, History
+  ArrowRight, Filter, ChevronDown, Plus, Pencil, Trash2, CalendarDays, IndianRupee, Lock, LogOut, History, Search, CircleCheck
 } from "lucide-react";
 
 /* ---------------------------------------------------------------
@@ -331,7 +332,7 @@ function Landing({ setPage }) {
 /* ---------------------------------------------------------------
    WORK BOARD
 ------------------------------------------------------------------*/
-function TaskCard({ task, employees, onMove, onEdit, busy }) {
+function TaskCard({ task, employees, onMove, onEdit, busy, today }) {
   const emp = employees.find((e) => e.id === task.assignee);
   const pr = PRIORITY_META[task.priority];
   const order = ["todo", "inprogress", "done"];
@@ -369,9 +370,18 @@ function TaskCard({ task, employees, onMove, onEdit, busy }) {
           ))}
         </div>
       )}
-      {task.expectedCompletion && (
-        <div style={{ color: C.steel }} className="f-body text-xs flex items-center gap-1.5 mb-2">
-          <CalendarDays size={12} style={{ color: C.blue }} /> Due {fmtDate(task.expectedCompletion)}
+      {task.expectedCompletion && (() => {
+        const overdue = isOverdue(task, today);
+        return (
+          <div style={{ color: overdue ? C.orangeDeep : C.steel }} className={`f-body text-xs flex items-center gap-1.5 mb-2 ${overdue ? "font-semibold" : ""}`}>
+            <CalendarDays size={12} style={{ color: overdue ? C.orangeDeep : C.blue }} />
+            {overdue ? "Overdue, was due" : "Due"} {fmtDate(task.expectedCompletion)}
+          </div>
+        );
+      })()}
+      {task.status === "done" && task.completedAt && (
+        <div style={{ color: C.green }} className="f-body text-xs flex items-center gap-1.5 mb-2">
+          <CircleCheck size={12} /> Completed {fmtDate(task.completedAt)}
         </div>
       )}
       <div className="mb-2" />
@@ -642,13 +652,16 @@ function WorkBoard() {
   const [filter, setFilter] = useState("all");
   // null = form closed, "new" = creating, a task = editing it.
   const [editing, setEditing] = useState(null);
+  const [query, setQuery] = useState("");
+  const [sort, setSort] = useState("board");
+  const today = localDay();
 
   // Both return promises so the form can show a failure and stay open.
   const saveWork = async (form) => {
     if (editing === "new") {
       const created = useApi
         ? await createTask(form)
-        : { ...taskFromForm(form), id: nextLocalTaskId(tasks), status: "todo" };
+        : { ...taskFromForm(form), id: nextLocalTaskId(tasks), status: "todo", createdAt: new Date().toISOString(), completedAt: null };
       setTasks((prev) => [...prev, created]);
     } else {
       const id = editing.id;
@@ -683,7 +696,13 @@ function WorkBoard() {
     setAttempt((a) => a + 1);
   };
 
-  const setStatus = (id, status) => setTasks((prev) => prev.map((t) => (t.id === id ? { ...t, status } : t)));
+  // Moving to "done" stamps the completion day and moving back clears it, as
+  // the server does. previous restores a card exactly after a failed save.
+  const setStatus = (id, status, previous) => setTasks((prev) => prev.map((t) => {
+    if (t.id !== id) return t;
+    if (previous) return { ...t, status, completedAt: previous.completedAt };
+    return { ...t, status, completedAt: status === "done" ? (t.status === "done" ? t.completedAt : today) : null };
+  }));
 
   // One save per card at a time: a second move while the first is still being
   // saved could otherwise roll back to a status the server never had.
@@ -697,13 +716,17 @@ function WorkBoard() {
     setSaving((prev) => new Set(prev).add(id));
     updateTaskStatus(id, status)
       .catch((err) => {
-        setStatus(id, prevStatus);
+        setStatus(id, prevStatus, task);
         setSaveError(`Could not save the move for "${task.title}" (${id}); it was put back. ${err.message}`);
       })
       .finally(() => setSaving((prev) => { const next = new Set(prev); next.delete(id); return next; }));
   };
 
-  const visible = useMemo(() => (filter === "all" ? tasks : tasks.filter((t) => t.assignee === filter)), [tasks, filter]);
+  const visible = useMemo(() => {
+    const byStaff = filter === "all" ? tasks : tasks.filter((t) => t.assignee === filter);
+    return sortTasks(filterTasks(byStaff, query), sort);
+  }, [tasks, filter, query, sort]);
+  const overdueCount = tasks.filter((t) => isOverdue(t, today)).length;
   const columns = ["todo", "inprogress", "done"];
   const counts = { todo: 0, inprogress: 0, done: 0 };
   tasks.forEach((t) => { counts[t.status]++; });
@@ -764,6 +787,39 @@ function WorkBoard() {
           </div>
         )}
 
+        {/* Search & Sort */}
+        <div className="flex flex-col sm:flex-row sm:items-center gap-3 mb-4">
+          <label className="relative flex-1 max-w-md">
+            <Search size={15} style={{ color: C.steel }} className="absolute left-3 top-1/2 -translate-y-1/2" />
+            <input
+              type="search"
+              aria-label="Search work"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search by work, customer, district or NK number"
+              style={{ borderColor: C.line, color: C.ink }}
+              className="f-body text-sm w-full rounded border pl-9 pr-3 py-2 bg-white shadow-sm focus:outline-none focus:ring-2 focus:ring-orange-300"
+            />
+          </label>
+          <label className="flex items-center gap-2">
+            <span className="f-mono text-xs text-stone-500 shrink-0">Sort:</span>
+            <select
+              aria-label="Sort work"
+              value={sort}
+              onChange={(e) => setSort(e.target.value)}
+              style={{ borderColor: C.line, color: C.ink }}
+              className="f-body text-sm rounded border px-3 py-2 bg-white shadow-sm focus:outline-none focus:ring-2 focus:ring-orange-300"
+            >
+              {SORT_MODES.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
+            </select>
+          </label>
+          {overdueCount > 0 && (
+            <span data-testid="overdue-count" style={{ background: "#FDF0EA", color: C.orangeDeep, borderColor: C.orangeDeep }} className="f-body text-xs font-semibold px-3 py-1.5 rounded border sm:ml-auto self-start sm:self-auto">
+              {overdueCount} overdue
+            </span>
+          )}
+        </div>
+
         {/* Filter Bar */}
         <div className="flex items-center gap-2 mb-6 overflow-x-auto pb-2 no-scrollbar">
           <span className="f-mono text-xs text-stone-500 flex items-center gap-1 shrink-0 mr-1">
@@ -814,11 +870,11 @@ function WorkBoard() {
 
                 <div className="min-h-[250px]">
                   {colTasks.map((t) => (
-                    <TaskCard key={t.id} task={t} employees={employees} onMove={moveTask} onEdit={setEditing} busy={saving.has(t.id)} />
+                    <TaskCard key={t.id} task={t} employees={employees} onMove={moveTask} onEdit={setEditing} busy={saving.has(t.id)} today={today} />
                   ))}
                   {colTasks.length === 0 && (
                     <div style={{ borderColor: C.line, color: C.steel }} className="border border-dashed rounded-md p-8 text-center f-body text-xs">
-                      No assignments found in this status.
+                      {query.trim() ? "No work matches your search here." : "No assignments found in this status."}
                     </div>
                   )}
                 </div>

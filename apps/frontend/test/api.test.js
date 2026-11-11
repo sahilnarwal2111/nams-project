@@ -298,3 +298,11 @@ test("paymentFromApi puts the payment on the viewer's local day", () => {
   assert.equal(p.amount, 5000);
   assert.equal(p.id, 7);
 });
+
+test("taskFromApi shows completedAt as a local day and leaves createdAt as a timestamp", () => {
+  const justAfterMidnight = new Date(2026, 10, 11, 0, 30).toISOString();
+  const t = taskFromApi({ ...apiTask, createdAt: "2026-11-01T04:00:00.000Z", completedAt: justAfterMidnight });
+  assert.equal(t.completedAt, "2026-11-11");
+  assert.equal(t.createdAt, "2026-11-01T04:00:00.000Z");
+  assert.equal(taskFromApi({ ...apiTask, completedAt: null }).completedAt, null);
+});
