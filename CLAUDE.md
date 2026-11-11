@@ -78,6 +78,7 @@ apps/backend/
 ```
 
 Operational metric definitions, denominators, and source limits live in `docs/metrics/`; read them before adding report metrics.
+The feature-to-metric coverage inventory is `docs/metrics/coverage.md`; timestamp coverage is provisional until each source's deployment cutover is verified.
 
 Endpoints today (all under `/api`):
 
