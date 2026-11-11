@@ -7,7 +7,7 @@ Guidance for Claude Code when working in this repository. The `maintainer` agent
 Website and internal tools for a civil-engineering consultancy ("NK Consultancy", Jind, Haryana). An npm-workspaces monorepo:
 
 - `apps/frontend` — Vite + React 19 single-page site (marketing landing page, a Work Board kanban, and a Payments receivables tracker). Deployed on Vercel from `main`.
-- `apps/backend` — Express 5 + Prisma API over Postgres 16. Not deployed anywhere yet.
+- `apps/backend` — Express 5 + Prisma API over Postgres 16. Deployed on Render with the database on Neon; see Deployment.
 
 **Current state:** the Work Board (tasks, employees, saving status moves) and the Payments page (clients, saving logged reminders) use the API when `VITE_API_URL` is set, and fall back to the mock data in `App.jsx` when it is not (as on Vercel today). The landing page team section still uses mock data and does not call the API yet.
 
@@ -113,6 +113,15 @@ Tests run against a real database: `npm test` in the backend runs `prisma genera
 
 Frontend: Vercel, deploying `main`; every PR gets a preview URL. `vercel.json` sets `framework: vite` and `outputDirectory: dist` because Vercel's auto-detection expected `build/`.
 
-Backend: nowhere yet. Hosting for the API and database is an open decision.
+Backend: Render free web service (Singapore) with the database on Neon's free plan. `render.yaml` at the repo root is the Render Blueprint.
+
+- Build: `npm ci --include=dev && npm run build:backend`, which runs `prisma generate` and `prisma migrate deploy`. New migrations are applied on every deploy.
+- Start: `npm run start:backend`. Render sets `PORT`; health check is `/api/health`.
+- Render redeploys only when `apps/backend/**`, the root `package.json`, `package-lock.json` or `render.yaml` change.
+- `DATABASE_URL` (Neon, direct connection string) and `CORS_ORIGINS` are set in the Render dashboard, never in the repo. `CORS_ORIGINS` is `https://nams-project.vercel.app,https://nams-project-*-sahilnarwal2111s-projects.vercel.app`.
+- The frontend uses the hosted API only when `VITE_API_URL` is set in the Vercel project settings.
+- Seeding is a one-time manual step: `DATABASE_URL=<neon url> npm run prisma:seed` from a laptop. Do not add the seed to the build: it upserts and would overwrite edits to the seeded records on every deploy.
+- The free web service sleeps after 15 idle minutes, so the first request after a quiet spell can take up to a minute.
+- The API has no login yet. Keep real client data off the hosted database until it does.
 
 The remote also has a stale `master` branch holding only the first commit; `main` is the default.
