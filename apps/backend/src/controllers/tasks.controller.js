@@ -63,7 +63,18 @@ export async function createTask(req, res) {
   throw new Error("Could not allocate a task id");
 }
 
-const EDITABLE_FIELDS = ["title", "client", "assigneeId", "priority", "status"];
+export async function deleteTask(req, res) {
+  const { id } = req.params;
+  try {
+    await prisma.task.delete({ where: { id } });
+    res.status(204).end();
+  } catch (err) {
+    if (err.code === "P2025") return res.status(404).json({ error: `Task ${id} not found` });
+    throw err;
+  }
+}
+
+const EDITABLE_FIELDS =["title", "client", "assigneeId", "priority", "status"];
 
 // PATCH: only the fields sent are changed. `id`, `updatedAt` and any other
 // unknown keys are ignored.

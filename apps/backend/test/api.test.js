@@ -235,6 +235,30 @@ test("POST /api/tasks rejects bad priority, status and assignee", async () => {
   assert.equal(await taskCount(), n, "a rejected request created a task");
 });
 
+test("DELETE /api/tasks/:id removes a task and returns 204 with no body", async () => {
+  let createdId;
+  try {
+    const created = await (await post("/api/tasks", validTask)).json();
+    createdId = created.id;
+    const res = await fetch(`${base}/api/tasks/${createdId}`, { method: "DELETE" });
+    assert.equal(res.status, 204);
+    assert.equal(await res.text(), "");
+    assert.equal((await get(`/api/tasks/${createdId}`)).status, 404);
+    const list = await (await get("/api/tasks")).json();
+    assert.ok(!list.some((t) => t.id === createdId));
+  } finally {
+    if (createdId) await prisma.task.deleteMany({ where: { id: createdId } });
+  }
+});
+
+test("DELETE /api/tasks/:id returns 404 for an unknown task", async () => {
+  const n = await taskCount();
+  const res = await fetch(`${base}/api/tasks/NK-9999`, { method: "DELETE" });
+  assert.equal(res.status, 404);
+  assert.match((await res.json()).error, /NK-9999/);
+  assert.equal(await taskCount(), n);
+});
+
 test("GET /api/clients returns receivables with valid statuses", async () => {
   const res = await get("/api/clients");
   assert.equal(res.status, 200);
