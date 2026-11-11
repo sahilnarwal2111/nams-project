@@ -43,7 +43,7 @@ Node 24 on the host; no Docker required. The backend needs a Postgres 16 databas
 
 ## Frontend architecture
 
-API access lives in `apps/frontend/src/api.js`: `hasApi()` (true when `import.meta.env.VITE_API_URL` is set; see `apps/frontend/.env.example`), `fetchEmployees`, `fetchTasks`, `updateTaskStatus`, `fetchClients`, `logClientCall`, and small pure converters (`taskFromApi`: `assigneeId` → `assignee`; `clientFromApi`: ISO `invoiceDate`/`lastCall` → `YYYY-MM-DD` via `dateFromApi`, etc.). Non-2xx responses throw an `Error` with a readable message. The converters are tested in `apps/frontend/test/api.test.js` with `node:test`. Keep conversions pure and in `api.js`.
+API access lives in `apps/frontend/src/api.js`: `hasApi()` (true when `import.meta.env.VITE_API_URL` is set; see `apps/frontend/.env.example`), `fetchEmployees`, `fetchTasks`, `updateTaskStatus`, `fetchClients`, `logClientCall`, and small pure converters (`taskFromApi`: `assigneeId` → `assignee`; `clientFromApi`: ISO `invoiceDate` → `YYYY-MM-DD` by UTC day via `dateFromApi`, ISO `lastCall` → `YYYY-MM-DD` by the viewer's local day via `instantFromApi`; `localDay()` is the UI's "today"). Non-2xx responses throw an `Error` with a readable message. The converters are tested in `apps/frontend/test/api.test.js` with `node:test`. The frontend test script sets `TZ=Asia/Kolkata` so the date tests mean the same thing on CI as in the office. Keep conversions pure and in `api.js`.
 
 The Work Board in API mode shows a loading state, an error with Retry if the load fails (never a silent mock fallback), moves cards optimistically, and rolls back with an error banner if the `PATCH` fails. Without `VITE_API_URL` it behaves as before on the mock data.
 
@@ -95,7 +95,7 @@ Design decisions to preserve:
 
 - **IDs are the frontend's human-readable values** (`e1`, `NK-101`, `c1`), not generated. Keeps the API's output identical to the mock data.
 - **Enum-like fields are plain strings** matching the frontend exactly: task `status` `todo|inprogress|done`, task `priority` `low|medium|high`, client `status` `paid|due-soon|overdue`. No Prisma enums, no case or hyphen remapping.
-- **Dates:** the API returns ISO timestamps; the UI uses `YYYY-MM-DD`. Convert in the frontend at the fetch boundary.
+- **Dates:** the API returns ISO timestamps; the UI uses `YYYY-MM-DD`. Convert in the frontend at the fetch boundary. A calendar date with no time (an invoice date) is stored as midnight UTC and read by its UTC day; a moment in time (a logged call) is read by the viewer's local day. Mixing the two makes "today" wrong before 05:30 IST.
 - Unknown IDs return 404 (Prisma `P2025`); anything else falls through to the 500 handler in `app.js`.
 - CORS: `CORS_ORIGINS` is a comma-separated allowlist with `*` wildcards; unset allows everything (fine locally, not in production).
 

@@ -7,6 +7,8 @@ import {
   employeesFromApi,
   statusPatchBody,
   dateFromApi,
+  instantFromApi,
+  localDay,
   clientFromApi,
   clientsFromApi,
   logCallPatchBody,
@@ -82,10 +84,31 @@ test("dateFromApi passes through short dates and unparseable values", () => {
   assert.equal(dateFromApi(null), null);
 });
 
-test("clientFromApi converts both dates and keeps other fields", () => {
+test("localDay formats a date in the local time zone", () => {
+  assert.equal(localDay(new Date(2026, 0, 5, 0, 0)), "2026-01-05");
+  assert.equal(localDay(new Date(2026, 10, 11, 23, 59)), "2026-11-11");
+});
+
+// Regression: these tests run with TZ=Asia/Kolkata. 00:30 IST on 11 Nov is still
+// 10 Nov in UTC, and the page used the UTC date, so a reminder logged just after
+// midnight showed "1 day ago" and was not counted in "Followed Up Today".
+test("instantFromApi gives the local day, not the UTC day", () => {
+  const justAfterMidnight = new Date(2026, 10, 11, 0, 30);
+  assert.equal(justAfterMidnight.toISOString().slice(0, 10), "2026-11-10", "test needs a zone ahead of UTC");
+  assert.equal(instantFromApi(justAfterMidnight.toISOString()), "2026-11-11");
+  assert.equal(instantFromApi(justAfterMidnight.toISOString()), localDay(justAfterMidnight));
+});
+
+test("instantFromApi passes through short dates and unparseable values", () => {
+  assert.equal(instantFromApi("2026-05-12"), "2026-05-12");
+  assert.equal(instantFromApi("not a date"), "not a date");
+  assert.equal(instantFromApi(null), null);
+});
+
+test("clientFromApi keeps the invoice date on its UTC day and the last call on its local day", () => {
   const c = clientFromApi(apiClient);
   assert.equal(c.invoiceDate, "2026-05-12");
-  assert.equal(c.lastCall, "2026-07-18");
+  assert.equal(c.lastCall, "2026-07-19");
   assert.equal(c.due, 184000);
   assert.equal(c.status, "overdue");
   assert.equal(c.notes, null);
@@ -100,7 +123,7 @@ test("clientFromApi does not mutate its input", () => {
 test("clientsFromApi maps lists", () => {
   assert.deepEqual(clientsFromApi([]), []);
   const out = clientsFromApi([apiClient, { ...apiClient, id: "c2", lastCall: "2026-08-01T10:00:00.000Z" }]);
-  assert.deepEqual(out.map((c) => c.lastCall), ["2026-07-18", "2026-08-01"]);
+  assert.deepEqual(out.map((c) => c.lastCall), ["2026-07-19", "2026-08-01"]);
 });
 
 test("logCallPatchBody is empty", () => {
