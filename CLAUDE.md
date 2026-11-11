@@ -39,7 +39,7 @@ Node 24 on the host; no Docker required. The backend needs a Postgres 16 databas
 
 ## CI
 
-`.github/workflows/ci.yml` runs on every PR and on pushes to `main`: frontend lint + build, and backend lint + tests against a Postgres service container. A PR is not mergeable until it is green.
+`.github/workflows/ci.yml` runs on every PR and on pushes to `main`: frontend lint + tests + build, and backend lint + tests against a Postgres service container. A PR is not mergeable until it is green.
 
 ## Frontend architecture
 
