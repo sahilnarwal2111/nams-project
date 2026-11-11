@@ -74,7 +74,7 @@ export async function deleteTask(req, res) {
   }
 }
 
-const EDITABLE_FIELDS =["title", "client", "assigneeId", "priority", "status"];
+const EDITABLE_FIELDS = ["title", "client", "assigneeId", "priority", "status"];
 
 // PATCH: only the fields sent are changed. `id`, `updatedAt` and any other
 // unknown keys are ignored.
