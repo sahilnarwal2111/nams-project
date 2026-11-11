@@ -1376,3 +1376,18 @@ test("personal passwords do nothing while sign-in is switched off", async () => 
   assert.equal(res.status, 400);
   assert.deepEqual((await (await get("/api/auth/session")).json()).people, []);
 });
+
+// --- Public team list for the landing page ---
+
+test("GET /api/team is public and sends only name, role and initials", async () => {
+  await withPeople(async () => {
+    const res = await get("/api/team");
+    assert.equal(res.status, 200);
+    const team = await res.json();
+    assert.deepEqual(team.map((e) => e.id), ["e1", "e2", "e3", "e4", "e5", "e6", "e7"]);
+    for (const e of team) assert.deepEqual(Object.keys(e).sort(), ["id", "initials", "name", "role"]);
+    assert.equal(team.find((e) => e.id === "e6").name, "Ankit");
+    const text = JSON.stringify(team);
+    assert.ok(!text.includes("scrypt") && !text.includes("hasPassword") && !text.includes("tasks"));
+  });
+});

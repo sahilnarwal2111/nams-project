@@ -345,6 +345,11 @@ async function request(path, options = {}) {
   return res.status === 204 ? null : res.json();
 }
 
+// Public list for the landing page: names, roles and initials only.
+export async function fetchTeam() {
+  return employeesFromApi(await request("/api/team"));
+}
+
 export async function fetchEmployees() {
   return employeesFromApi(await request("/api/employees"));
 }
