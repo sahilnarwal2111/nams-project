@@ -31,6 +31,17 @@ model Task {
   assigneeId String
   assignee   Employee @relation(fields: [assigneeId], references: [id])
   updatedAt  DateTime @updatedAt
+
+  // Optional details from the "new work" form.
+  customerPhone      String?
+  district           String?
+  department         String?
+  // Any of "survey" | "x-section" | "drawing" | "design" | "printout", matching
+  // the frontend's WORK_TYPES ids.
+  workTypes          String[]  @default([])
+  details            String?
+  // A calendar date with no time: stored as midnight UTC.
+  expectedCompletion DateTime?
 }
 
 model Client {

@@ -1,10 +1,13 @@
 import { useState, useMemo, useEffect } from "react";
-import { hasApi, fetchEmployees, fetchTasks, updateTaskStatus, fetchClients, logClientCall, localDay } from "./api.js";
+import {
+  hasApi, fetchEmployees, fetchTasks, updateTaskStatus, fetchClients, logClientCall, localDay,
+  createTask, updateTask, deleteTask, taskFromForm, nextLocalTaskId,
+} from "./api.js";
 import {
   Ruler, Route, Building2, Droplets, Plane, Waves,
   Menu, X, ChevronRight, Clock, PhoneCall,
   Mail, Phone, MapPin, ArrowLeft,
-  ArrowRight, Filter, ChevronDown
+  ArrowRight, Filter, ChevronDown, Plus, Pencil, Trash2, CalendarDays
 } from "lucide-react";
 
 /* ---------------------------------------------------------------
@@ -94,6 +97,15 @@ const PRIORITY_META = {
   medium: { label: "Medium", color: C.blue, bg: "#EBF3FA" },
   low: { label: "Low", color: C.steel, bg: "#F0F2F4" },
 };
+
+// Ids match the API's workTypes values exactly, like status and priority.
+const WORK_TYPES = [
+  { id: "survey", label: "Survey" },
+  { id: "x-section", label: "X-Section" },
+  { id: "drawing", label: "Drawing" },
+  { id: "design", label: "Design" },
+  { id: "printout", label: "Printout" },
+];
 
 const PAY_STATUS_META = {
   paid: { label: "Paid", color: C.green, bg: "#EEF3ED" },
@@ -298,7 +310,7 @@ function Landing({ setPage }) {
 /* ---------------------------------------------------------------
    WORK BOARD
 ------------------------------------------------------------------*/
-function TaskCard({ task, employees, onMove, busy }) {
+function TaskCard({ task, employees, onMove, onEdit, busy }) {
   const emp = employees.find((e) => e.id === task.assignee);
   const pr = PRIORITY_META[task.priority];
   const order = ["todo", "inprogress", "done"];
@@ -308,12 +320,40 @@ function TaskCard({ task, employees, onMove, busy }) {
     <div style={{ background: C.card, borderColor: C.line }} className="border rounded-md p-4 mb-3 shadow-sm hover:shadow transition-shadow">
       <div className="flex items-center justify-between mb-2">
         <span style={{ color: C.steel }} className="f-mono text-[11px] font-medium">{task.id}</span>
-        <span style={{ background: pr.bg, color: pr.color }} className="f-mono text-[10px] font-semibold px-2 py-0.5 rounded">
-          {pr.label}
-        </span>
+        <div className="flex items-center gap-1.5">
+          <span style={{ background: pr.bg, color: pr.color }} className="f-mono text-[10px] font-semibold px-2 py-0.5 rounded">
+            {pr.label}
+          </span>
+          <button
+            onClick={() => onEdit(task)}
+            aria-label={`Edit ${task.id}`}
+            style={{ color: C.steel }}
+            className="p-1 rounded hover:bg-stone-100 active:scale-95 transition-transform"
+          >
+            <Pencil size={12} />
+          </button>
+        </div>
       </div>
       <h4 style={{ color: C.ink }} className="f-body text-sm font-semibold leading-snug mb-1">{task.title}</h4>
-      <p style={{ color: C.steel }} className="f-body text-xs mb-4">{task.client}</p>
+      <p style={{ color: C.steel }} className="f-body text-xs mb-2">
+        {task.client}{task.district ? ` · ${task.district}` : ""}
+      </p>
+
+      {task.workTypes?.length > 0 && (
+        <div className="flex flex-wrap gap-1 mb-2">
+          {WORK_TYPES.filter((w) => task.workTypes.includes(w.id)).map((w) => (
+            <span key={w.id} style={{ background: C.paper, color: C.blue, borderColor: C.line }} className="f-mono text-[10px] px-1.5 py-0.5 rounded border">
+              {w.label}
+            </span>
+          ))}
+        </div>
+      )}
+      {task.expectedCompletion && (
+        <div style={{ color: C.steel }} className="f-body text-xs flex items-center gap-1.5 mb-2">
+          <CalendarDays size={12} style={{ color: C.blue }} /> Due {fmtDate(task.expectedCompletion)}
+        </div>
+      )}
+      <div className="mb-2" />
 
       <div className="flex items-center justify-between pt-2 border-t border-stone-100">
         <div className="flex items-center gap-2">
@@ -350,6 +390,188 @@ function TaskCard({ task, employees, onMove, busy }) {
   );
 }
 
+const EMPTY_WORK = {
+  title: "", client: "", customerPhone: "", district: "", department: "",
+  workTypes: [], details: "", expectedCompletion: "", priority: "medium", assignee: "",
+};
+
+const INPUT_CLASS = "f-body text-sm w-full rounded border px-3 py-2 bg-white focus:outline-none focus:ring-2 focus:ring-orange-300";
+
+function Field({ label, required, children }) {
+  return (
+    <label className="block">
+      <span style={{ color: C.steel }} className="f-mono text-[10px] uppercase tracking-wider font-medium block mb-1">
+        {label}{required && <span style={{ color: C.orangeDeep }}> *</span>}
+      </span>
+      {children}
+    </label>
+  );
+}
+
+// Create (task = null) or edit a work item. onSave and onDelete return promises;
+// a rejection is shown in the form and the form stays open.
+function WorkForm({ task, employees, onSave, onDelete, onClose }) {
+  const [form, setForm] = useState(() => ({
+    ...EMPTY_WORK,
+    assignee: employees[0]?.id ?? "",
+    ...(task
+      ? Object.fromEntries(Object.keys(EMPTY_WORK).map((k) => [k, task[k] ?? EMPTY_WORK[k]]))
+      : {}),
+  }));
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+
+  const set = (key) => (e) => setForm((f) => ({ ...f, [key]: e.target.value }));
+  const toggleType = (id) =>
+    setForm((f) => ({ ...f, workTypes: f.workTypes.includes(id) ? f.workTypes.filter((t) => t !== id) : [...f.workTypes, id] }));
+
+  const run = (action) => {
+    setBusy(true);
+    setError(null);
+    action()
+      .then(onClose)
+      .catch((err) => { setError(err.message); setBusy(false); });
+  };
+
+  const submit = (e) => {
+    e.preventDefault();
+    if (form.title.trim() === "" || form.client.trim() === "") {
+      setError("Work name and customer name are required.");
+      return;
+    }
+    run(() => onSave(form));
+  };
+
+  const line = { borderColor: C.line, color: C.ink };
+
+  return (
+    <div
+      style={{ background: "rgba(9, 21, 36, 0.55)" }}
+      className="fixed inset-0 z-[60] flex items-start sm:items-center justify-center p-3 sm:p-6 overflow-y-auto"
+      onClick={(e) => { if (e.target === e.currentTarget && !busy) onClose(); }}
+    >
+      <form
+        onSubmit={submit}
+        role="dialog"
+        aria-label={task ? `Edit ${task.id}` : "New work"}
+        style={{ background: C.paper, borderColor: C.line }}
+        className="w-full max-w-2xl border rounded-lg shadow-xl"
+      >
+        <div style={{ background: C.navy }} className="flex items-center justify-between px-5 py-4 rounded-t-lg">
+          <div>
+            <div style={{ color: C.orange }} className="f-mono text-[10px] font-semibold tracking-wider uppercase">
+              {task ? task.id : "Work Order"}
+            </div>
+            <h2 style={{ color: C.paper }} className="f-display text-lg font-bold">{task ? "Edit Work" : "New Work"}</h2>
+          </div>
+          <button type="button" onClick={onClose} disabled={busy} aria-label="Close" style={{ color: C.paper }} className="p-1 rounded hover:opacity-80">
+            <X size={20} />
+          </button>
+        </div>
+
+        <div className="p-5 grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div className="sm:col-span-2">
+            <Field label="Work name" required>
+              <input name="title" value={form.title} onChange={set("title")} required autoFocus style={line} className={INPUT_CLASS} placeholder="e.g. Topographic survey, Narwana layout" />
+            </Field>
+          </div>
+          <Field label="Customer name" required>
+            <input name="client" value={form.client} onChange={set("client")} required style={line} className={INPUT_CLASS} />
+          </Field>
+          <Field label="Customer mobile number">
+            <input name="customerPhone" type="tel" value={form.customerPhone} onChange={set("customerPhone")} style={line} className={INPUT_CLASS} placeholder="+91" />
+          </Field>
+          <Field label="District">
+            <input name="district" value={form.district} onChange={set("district")} style={line} className={INPUT_CLASS} />
+          </Field>
+          <Field label="Department">
+            <input name="department" value={form.department} onChange={set("department")} style={line} className={INPUT_CLASS} />
+          </Field>
+
+          <div className="sm:col-span-2">
+            <span style={{ color: C.steel }} className="f-mono text-[10px] uppercase tracking-wider font-medium block mb-1.5">Work type</span>
+            <div className="flex flex-wrap gap-2">
+              {WORK_TYPES.map((w) => {
+                const on = form.workTypes.includes(w.id);
+                return (
+                  <button
+                    key={w.id}
+                    type="button"
+                    aria-pressed={on}
+                    onClick={() => toggleType(w.id)}
+                    style={{ background: on ? C.navy : C.card, color: on ? C.paper : C.ink, borderColor: on ? C.navy : C.line }}
+                    className="f-body text-xs px-3 py-1.5 rounded border font-medium shadow-sm"
+                  >
+                    {w.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="sm:col-span-2">
+            <Field label="Other details">
+              <textarea name="details" value={form.details} onChange={set("details")} rows={3} style={line} className={INPUT_CLASS} />
+            </Field>
+          </div>
+
+          <Field label="Expected completion">
+            <input name="expectedCompletion" type="date" value={form.expectedCompletion} onChange={set("expectedCompletion")} style={line} className={INPUT_CLASS} />
+          </Field>
+          <Field label="Priority" required>
+            <select name="priority" value={form.priority} onChange={set("priority")} style={line} className={INPUT_CLASS}>
+              {["high", "medium", "low"].map((p) => <option key={p} value={p}>{PRIORITY_META[p].label}</option>)}
+            </select>
+          </Field>
+          <div className="sm:col-span-2">
+            <Field label="Assign to" required>
+              <select name="assignee" value={form.assignee} onChange={set("assignee")} required style={line} className={INPUT_CLASS}>
+                {employees.map((e) => <option key={e.id} value={e.id}>{e.name} ({e.role})</option>)}
+              </select>
+            </Field>
+          </div>
+
+          {error && (
+            <div role="alert" style={{ borderColor: C.orangeDeep, background: "#FDF0EA", color: C.orangeDeep }} className="sm:col-span-2 border rounded-md px-3 py-2 f-body text-sm">
+              {error}
+            </div>
+          )}
+        </div>
+
+        <div style={{ borderColor: C.line }} className="border-t px-5 py-4 flex items-center justify-between gap-3 flex-wrap">
+          <div>
+            {task && !confirmDelete && (
+              <button type="button" onClick={() => setConfirmDelete(true)} disabled={busy} style={{ color: C.orangeDeep }} className="f-body text-xs font-semibold flex items-center gap-1.5 px-2 py-2 rounded hover:bg-orange-50">
+                <Trash2 size={14} /> Delete
+              </button>
+            )}
+            {task && confirmDelete && (
+              <div className="flex items-center gap-2">
+                <span style={{ color: C.orangeDeep }} className="f-body text-xs font-semibold">Delete this work permanently?</span>
+                <button type="button" onClick={() => run(() => onDelete(task.id))} disabled={busy} style={{ background: C.orangeDeep, color: C.paper }} className="f-body text-xs font-semibold px-3 py-1.5 rounded">
+                  Yes, delete
+                </button>
+                <button type="button" onClick={() => setConfirmDelete(false)} disabled={busy} style={{ borderColor: C.line, color: C.ink }} className="f-body text-xs px-3 py-1.5 rounded border bg-white">
+                  No
+                </button>
+              </div>
+            )}
+          </div>
+          <div className="flex items-center gap-2 ml-auto">
+            <button type="button" onClick={onClose} disabled={busy} style={{ borderColor: C.line, color: C.ink }} className="f-body text-sm px-4 py-2 rounded border bg-white">
+              Cancel
+            </button>
+            <button type="submit" disabled={busy} style={{ background: C.orange, color: C.paper }} className="f-body text-sm font-semibold px-5 py-2 rounded shadow-sm hover:opacity-90 disabled:opacity-60">
+              {busy ? "Saving…" : task ? "Save Changes" : "Add Work"}
+            </button>
+          </div>
+        </div>
+      </form>
+    </div>
+  );
+}
+
 function WorkBoard() {
   const useApi = hasApi();
   const [tasks, setTasks] = useState(useApi ? [] : INITIAL_TASKS);
@@ -359,6 +581,27 @@ function WorkBoard() {
   const [saveError, setSaveError] = useState(null);
   const [saving, setSaving] = useState(() => new Set());
   const [filter, setFilter] = useState("all");
+  // null = form closed, "new" = creating, a task = editing it.
+  const [editing, setEditing] = useState(null);
+
+  // Both return promises so the form can show a failure and stay open.
+  const saveWork = async (form) => {
+    if (editing === "new") {
+      const created = useApi
+        ? await createTask(form)
+        : { ...taskFromForm(form), id: nextLocalTaskId(tasks), status: "todo" };
+      setTasks((prev) => [...prev, created]);
+    } else {
+      const id = editing.id;
+      const updated = useApi ? await updateTask(id, form) : taskFromForm(form);
+      setTasks((prev) => prev.map((t) => (t.id === id ? { ...t, ...updated } : t)));
+    }
+  };
+
+  const removeWork = async (id) => {
+    if (useApi) await deleteTask(id);
+    setTasks((prev) => prev.filter((t) => t.id !== id));
+  };
 
   useEffect(() => {
     if (!useApi) return undefined;
@@ -415,6 +658,15 @@ function WorkBoard() {
           <div>
             <div style={{ color: C.orangeDeep }} className="f-mono text-xs font-semibold tracking-wider uppercase mb-1">Task Operations</div>
             <h1 style={{ color: C.ink }} className="f-display text-2xl sm:text-3xl font-bold">Project Work Board</h1>
+            {load.state === "ready" && (
+              <button
+                onClick={() => setEditing("new")}
+                style={{ background: C.orange, color: C.paper }}
+                className="f-body text-sm font-semibold px-4 py-2 mt-3 rounded shadow-sm hover:opacity-90 active:scale-95 transition-all inline-flex items-center gap-1.5"
+              >
+                <Plus size={16} /> New Work
+              </button>
+            )}
           </div>
           <div className="grid grid-cols-3 gap-2 sm:gap-3">
             {columns.map((c) => (
@@ -503,7 +755,7 @@ function WorkBoard() {
 
                 <div className="min-h-[250px]">
                   {colTasks.map((t) => (
-                    <TaskCard key={t.id} task={t} employees={employees} onMove={moveTask} busy={saving.has(t.id)} />
+                    <TaskCard key={t.id} task={t} employees={employees} onMove={moveTask} onEdit={setEditing} busy={saving.has(t.id)} />
                   ))}
                   {colTasks.length === 0 && (
                     <div style={{ borderColor: C.line, color: C.steel }} className="border border-dashed rounded-md p-8 text-center f-body text-xs">
@@ -517,6 +769,17 @@ function WorkBoard() {
         </div>
         </>)}
       </div>
+
+      {editing && (
+        <WorkForm
+          key={editing === "new" ? "new" : editing.id}
+          task={editing === "new" ? null : editing}
+          employees={employees}
+          onSave={saveWork}
+          onDelete={removeWork}
+          onClose={() => setEditing(null)}
+        />
+      )}
     </div>
   );
 }

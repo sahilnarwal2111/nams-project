@@ -43,7 +43,7 @@ Node 24 on the host; no Docker required. The backend needs a Postgres 16 databas
 
 ## Frontend architecture
 
-API access lives in `apps/frontend/src/api.js`: `hasApi()` (true when `import.meta.env.VITE_API_URL` is set; see `apps/frontend/.env.example`), `fetchEmployees`, `fetchTasks`, `updateTaskStatus`, `fetchClients`, `logClientCall`, and small pure converters (`taskFromApi`: `assigneeId` → `assignee`; `clientFromApi`: ISO `invoiceDate` → `YYYY-MM-DD` by UTC day via `dateFromApi`, ISO `lastCall` → `YYYY-MM-DD` by the viewer's local day via `instantFromApi`; `localDay()` is the UI's "today"). Non-2xx responses throw an `Error` with a readable message. The converters are tested in `apps/frontend/test/api.test.js` with `node:test`. The frontend test script sets `TZ=Asia/Kolkata` so the date tests mean the same thing on CI as in the office. Keep conversions pure and in `api.js`.
+API access lives in `apps/frontend/src/api.js`: `hasApi()` (true when `import.meta.env.VITE_API_URL` is set; see `apps/frontend/.env.example`), `fetchEmployees`, `fetchTasks`, `updateTaskStatus`, `createTask`, `updateTask`, `deleteTask`, `fetchClients`, `logClientCall`, and small pure converters (`taskFromApi`: `assigneeId` → `assignee`; `taskToApi`: the work form's values → request body, blanks as `null`; `clientFromApi`: ISO `invoiceDate` → `YYYY-MM-DD` by UTC day via `dateFromApi`, ISO `lastCall` → `YYYY-MM-DD` by the viewer's local day via `instantFromApi`; `localDay()` is the UI's "today"). Non-2xx responses throw an `Error` with a readable message. The converters are tested in `apps/frontend/test/api.test.js` with `node:test`. The frontend test script sets `TZ=Asia/Kolkata` so the date tests mean the same thing on CI as in the office. Keep conversions pure and in `api.js`.
 
 The Work Board in API mode shows a loading state, an error with Retry if the load fails (never a silent mock fallback), moves cards optimistically, and rolls back with an error banner if the `PATCH` fails. Without `VITE_API_URL` it behaves as before on the mock data.
 
@@ -52,8 +52,8 @@ The Payments page follows the same pattern in API mode: loading state, error wit
 Everything else lives in `apps/frontend/src/App.jsx` (~650 lines), top to bottom:
 
 1. `C` — design-token object of hex colors used via inline `style={{ }}` for brand colors, layered with Tailwind utility classes for layout and spacing. Brand colors go through `C`, everything else through Tailwind. Keep that split.
-2. Mock data (`SERVICES`, `EMPLOYEES`, `INITIAL_TASKS`, `INITIAL_CLIENTS`) and `*_META` lookups (`STATUS_META`, `PRIORITY_META`, `PAY_STATUS_META`) mapping enum values to label/color. These literal enum values are the contract with the API — see below.
-3. Page components: `TopNav`, `Landing`, `WorkBoard` (move-left/move-right buttons, no drag), `Payments` (call logging).
+2. Mock data (`SERVICES`, `EMPLOYEES`, `INITIAL_TASKS`, `INITIAL_CLIENTS`) and `*_META` lookups (`STATUS_META`, `PRIORITY_META`, `PAY_STATUS_META`, plus the `WORK_TYPES` list) mapping enum values to label/color. These literal enum values are the contract with the API — see below.
+3. Page components: `TopNav`, `Landing`, `WorkBoard` (move-left/move-right buttons, no drag; a `WorkForm` dialog creates, edits and deletes work items, in mock mode too), `Payments` (call logging).
 4. `App` — page switching via a `useState` string (`home` / `work` / `payments`). There is no router, so back/forward and deep links do not work.
 
 Styling: Tailwind v4 via `@tailwindcss/vite`, entry `src/index.css`, which also defines the custom classes (`f-display`, `f-body`, `f-mono`, `contour-bg`, `grid-bg`, `card-hover`, `no-scrollbar`) and imports Google Fonts. **The Google Fonts `@import` must stay above `@import "tailwindcss"`** — CSS requires all `@import`s before other rules and Tailwind's import expands into generated rules, so reversing them breaks the build.
@@ -83,18 +83,20 @@ Endpoints today (all under `/api`):
 | `GET /api/employees` | none | 200, list of employees | none |
 | `GET /api/tasks` | none | 200, list of tasks | none |
 | `GET /api/tasks/:id` | none | 200, the task | 404 if the task is unknown |
-| `POST /api/tasks` | `{ title, client, assigneeId, priority, status? }`; `status` defaults to `todo` | 201, the task; id generated as highest `NK-###` + 1 | 400 `{ error }` on missing/empty fields, invalid `priority`/`status`, or unknown `assigneeId` |
-| `PATCH /api/tasks/:id` | any of `title`, `client`, `assigneeId`, `priority`, `status`; only the fields sent change; `id`/`updatedAt` are ignored | 200, the updated task | 400 `{ error }` on an empty body, empty `title`/`client`, invalid `priority`/`status`, or unknown `assigneeId`; 404 if the task is unknown |
+| `POST /api/tasks` | `{ title, client, assigneeId, priority, status? }` plus the optional work details below; `status` defaults to `todo` | 201, the task; id generated as highest `NK-###` + 1 | 400 `{ error }` on missing/empty fields, invalid `priority`/`status`, unknown `assigneeId`, or an invalid work detail |
+| `PATCH /api/tasks/:id` | any of `title`, `client`, `assigneeId`, `priority`, `status` and the work details below; only the fields sent change; `id`/`updatedAt` are ignored | 200, the updated task | 400 `{ error }` on an empty body, empty `title`/`client`, invalid `priority`/`status`, unknown `assigneeId`, or an invalid work detail; 404 if the task is unknown |
 | `DELETE /api/tasks/:id` | none | 204, no body; permanently deletes | 404 `{ error }` if the task is unknown |
 | `GET /api/clients` | none | 200, list of clients | none |
 | `POST /api/clients` | required `name`, `contact`, `phone` (non-empty strings), `due` (integer >= 0 rupees), `invoiceDate`, `status` (`paid\|due-soon\|overdue`); optional `notes`, `lastCall` (defaults to now); dates accept `YYYY-MM-DD` or a full ISO timestamp | 201, the client; id generated as highest `c#` + 1 | 400 `{ error }` on a missing field, invalid `status`, negative/non-integer `due`, or unparseable date |
 | `PATCH /api/clients/:id` | any of `name`, `contact`, `phone`, `due`, `invoiceDate`, `lastCall`, `status`, `notes`, validated like `POST /api/clients` (`notes` may be `null` to clear it); only the fields sent change and `lastCall` is untouched unless sent; `id` and unknown keys are ignored; with no body, an empty body, or no editable fields it logs a call, setting `lastCall` to now | 200, the updated client | 400 `{ error }` on any invalid field, including `null` for anything but `notes`; 404 if the client is unknown |
 | `DELETE /api/clients/:id` | none | 204, no body; permanently deletes | 404 `{ error }` if the client is unknown |
 
+Work details on a task (all optional, from the "new work" form): `customerPhone`, `district`, `department`, `details` (strings; blank or `null` clears), `workTypes` (a list drawn from `survey`, `x-section`, `drawing`, `design`, `printout`; returned in that fixed order), `expectedCompletion` (`YYYY-MM-DD` or an ISO timestamp; `null` or `""` clears).
+
 Design decisions to preserve:
 
 - **IDs are the frontend's human-readable values** (`e1`, `NK-101`, `c1`), not generated. Keeps the API's output identical to the mock data.
-- **Enum-like fields are plain strings** matching the frontend exactly: task `status` `todo|inprogress|done`, task `priority` `low|medium|high`, client `status` `paid|due-soon|overdue`. No Prisma enums, no case or hyphen remapping.
+- **Enum-like fields are plain strings** matching the frontend exactly: task `status` `todo|inprogress|done`, task `priority` `low|medium|high`, task `workTypes` entries `survey|x-section|drawing|design|printout`, client `status` `paid|due-soon|overdue`. No Prisma enums, no case or hyphen remapping.
 - **Dates:** the API returns ISO timestamps; the UI uses `YYYY-MM-DD`. Convert in the frontend at the fetch boundary. A calendar date with no time (an invoice date) is stored as midnight UTC and read by its UTC day; a moment in time (a logged call) is read by the viewer's local day. Mixing the two makes "today" wrong before 05:30 IST.
 - Unknown IDs return 404 (Prisma `P2025`); anything else falls through to the 500 handler in `app.js`.
 - CORS: `CORS_ORIGINS` is a comma-separated allowlist with `*` wildcards; unset allows everything (fine locally, not in production).
