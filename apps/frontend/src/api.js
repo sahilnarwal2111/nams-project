@@ -282,16 +282,37 @@ export function canEditTask(task, viewer) {
   return Boolean(viewer?.isAdmin || (viewer?.employeeId && task.assignee === viewer.employeeId));
 }
 
+// The entry for the shared passwords, named after the ones that exist on the
+// server. methods comes from the session; unknown means both.
+export function sharedChoiceLabel(methods) {
+  const admin = methods?.admin !== false;
+  const office = methods?.office !== false;
+  if (admin && !office) return "Admin password";
+  if (office && !admin) return "Office password";
+  return "Admin or office password";
+}
+
 // Who to sign in as: "shared" (the admin or office password; the password
 // decides which) or an employee id. The shared choice comes first and is the
-// default, so the admin can always just type their password. A remembered choice
-// is kept only while it is still on offer.
-export function signInChoices(people = []) {
-  return [{ value: "shared", label: "Admin or office password" }, ...people.map((p) => ({ value: p.id, label: p.name }))];
+// default, so the admin can always just type their password. Every person is
+// listed as a profile; ready is false until the admin gives them a password.
+export function signInChoices(people = [], methods) {
+  return [
+    { value: "shared", label: sharedChoiceLabel(methods), ready: true },
+    ...people.map((p) => {
+      const ready = p.hasPassword !== false;
+      return { value: p.id, name: p.name, label: ready ? p.name : `${p.name} (no password yet)`, ready };
+    }),
+  ];
 }
 export function defaultSignInChoice(people = [], remembered = null) {
-  const choices = signInChoices(people);
-  return choices.some((c) => c.value === remembered) ? remembered : choices[0].value;
+  return signInChoices(people).some((c) => c.value === remembered && c.ready) ? remembered : "shared";
+}
+
+// How the signed-in viewer is named in the menu.
+export function viewerLabel(session) {
+  if (session.name) return session.name;
+  return session.role === "admin" ? "Admin" : "Office";
 }
 
 // Why a personal password cannot be saved, or null. Mirrors the API.
@@ -429,6 +450,9 @@ export async function fetchSession() {
     employeeId: session.employeeId ?? null,
     name: session.name ?? null,
     people: Array.isArray(session.people) ? session.people : [],
+    // Which shared passwords exist on the server. An older server does not
+    // say, and then both are assumed.
+    methods: { admin: session.methods?.admin !== false, office: session.methods?.office !== false },
   };
 }
 

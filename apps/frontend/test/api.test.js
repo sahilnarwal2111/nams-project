@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  sharedChoiceLabel,
+  viewerLabel,
   canEditTask,
   signInChoices,
   defaultSignInChoice,
@@ -416,4 +418,33 @@ test("employeeFromApi keeps hasPassword only when the API sends it", () => {
   assert.equal(employeeFromApi({ ...base, hasPassword: true }).hasPassword, true);
   assert.equal("hasPassword" in employeeFromApi(base), false);
   assert.equal("passwordHash" in employeeFromApi({ ...base, passwordHash: "scrypt$x$y" }), false);
+});
+
+test("sign-in choices list every profile and mark the ones without a password", () => {
+  const people = [
+    { id: "e1", name: "Narender Kumar", hasPassword: false },
+    { id: "e6", name: "Ankit", hasPassword: true },
+  ];
+  assert.deepEqual(signInChoices(people), [
+    { value: "shared", label: "Admin or office password", ready: true },
+    { value: "e1", name: "Narender Kumar", label: "Narender Kumar (no password yet)", ready: false },
+    { value: "e6", name: "Ankit", label: "Ankit", ready: true },
+  ]);
+  assert.equal(defaultSignInChoice(people, "e6"), "e6");
+  assert.equal(defaultSignInChoice(people, "e1"), "shared", "a profile without a password is never preselected");
+  assert.equal(defaultSignInChoice(people, null), "shared");
+});
+
+test("sharedChoiceLabel names the shared passwords that exist", () => {
+  assert.equal(sharedChoiceLabel({ admin: true, office: true }), "Admin or office password");
+  assert.equal(sharedChoiceLabel({ admin: false, office: true }), "Office password");
+  assert.equal(sharedChoiceLabel({ admin: true, office: false }), "Admin password");
+  assert.equal(sharedChoiceLabel(undefined), "Admin or office password");
+  assert.equal(signInChoices([], { admin: false, office: true })[0].label, "Office password");
+});
+
+test("viewerLabel names a person, the admin or the office sign-in", () => {
+  assert.equal(viewerLabel({ role: "staff", name: "Ankit" }), "Ankit");
+  assert.equal(viewerLabel({ role: "admin", name: null }), "Admin");
+  assert.equal(viewerLabel({ role: "staff", name: null }), "Office");
 });
