@@ -1,5 +1,6 @@
 // Fetch helpers and API <-> UI conversions for the Work Board and Payments.
-// The API speaks `assigneeId` and ISO timestamps; the UI speaks `assignee` and YYYY-MM-DD.
+// The API speaks `assigneeId` and ISO timestamps; the UI speaks `assignee` and YYYY-MM-DD
+// (calendar dates by UTC day, moments in time by the viewer's local day).
 // Convert at this boundary only.
 
 // Empty/unset means "no API": callers fall back to mock data.
@@ -26,17 +27,35 @@ export function employeesFromApi(list) {
   return list.map(employeeFromApi);
 }
 
-// ISO timestamp -> YYYY-MM-DD (UTC day, matching how the UI computes "today").
+const SHORT_DATE = /^\d{4}-\d{2}-\d{2}$/;
+const pad = (n) => String(n).padStart(2, "0");
+
+// A Date -> YYYY-MM-DD in the viewer's own time zone. This is the UI's "today".
+export function localDay(date = new Date()) {
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+// For calendar dates with no time of day (an invoice date). The API stores them
+// as midnight UTC, so read the UTC day: the date must not shift with the time zone.
 // Already-short dates pass through; unparseable values are returned unchanged.
 export function dateFromApi(value) {
   if (typeof value !== "string") return value;
-  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
+  if (SHORT_DATE.test(value)) return value;
   const d = new Date(value);
   return Number.isNaN(d.getTime()) ? value : d.toISOString().slice(0, 10);
 }
 
+// For moments in time (when a call was logged): the viewer's local day, so a
+// call logged at 02:00 IST counts as today and not as yesterday's UTC date.
+export function instantFromApi(value) {
+  if (typeof value !== "string") return value;
+  if (SHORT_DATE.test(value)) return value;
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? value : localDay(d);
+}
+
 export function clientFromApi(c) {
-  return { ...c, invoiceDate: dateFromApi(c.invoiceDate), lastCall: dateFromApi(c.lastCall) };
+  return { ...c, invoiceDate: dateFromApi(c.invoiceDate), lastCall: instantFromApi(c.lastCall) };
 }
 
 export function clientsFromApi(list) {

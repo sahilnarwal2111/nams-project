@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect } from "react";
-import { hasApi, fetchEmployees, fetchTasks, updateTaskStatus, fetchClients, logClientCall } from "./api.js";
+import { hasApi, fetchEmployees, fetchTasks, updateTaskStatus, fetchClients, logClientCall, localDay } from "./api.js";
 import {
   Ruler, Route, Building2, Droplets, Plane, Waves,
   Menu, X, ChevronRight, Clock, PhoneCall,
@@ -298,7 +298,7 @@ function Landing({ setPage }) {
 /* ---------------------------------------------------------------
    WORK BOARD
 ------------------------------------------------------------------*/
-function TaskCard({ task, employees, onMove }) {
+function TaskCard({ task, employees, onMove, busy }) {
   const emp = employees.find((e) => e.id === task.assignee);
   const pr = PRIORITY_META[task.priority];
   const order = ["todo", "inprogress", "done"];
@@ -327,8 +327,9 @@ function TaskCard({ task, employees, onMove }) {
           {idx > 0 && (
             <button
               onClick={() => onMove(task.id, order[idx - 1])}
+              disabled={busy}
               style={{ borderColor: C.line }}
-              className="p-1 rounded border hover:bg-stone-100 text-slate-600 active:scale-95 transition-transform"
+              className="p-1 rounded border hover:bg-stone-100 text-slate-600 active:scale-95 transition-transform disabled:opacity-40"
             >
               <ArrowLeft size={13} />
             </button>
@@ -336,8 +337,9 @@ function TaskCard({ task, employees, onMove }) {
           {idx < order.length - 1 && (
             <button
               onClick={() => onMove(task.id, order[idx + 1])}
+              disabled={busy}
               style={{ borderColor: C.line }}
-              className="p-1 rounded border hover:bg-stone-100 text-slate-600 active:scale-95 transition-transform"
+              className="p-1 rounded border hover:bg-stone-100 text-slate-600 active:scale-95 transition-transform disabled:opacity-40"
             >
               <ArrowRight size={13} />
             </button>
@@ -355,6 +357,7 @@ function WorkBoard() {
   const [load, setLoad] = useState(useApi ? { state: "loading" } : { state: "ready" });
   const [attempt, setAttempt] = useState(0);
   const [saveError, setSaveError] = useState(null);
+  const [saving, setSaving] = useState(() => new Set());
   const [filter, setFilter] = useState("all");
 
   useEffect(() => {
@@ -380,16 +383,22 @@ function WorkBoard() {
 
   const setStatus = (id, status) => setTasks((prev) => prev.map((t) => (t.id === id ? { ...t, status } : t)));
 
+  // One save per card at a time: a second move while the first is still being
+  // saved could otherwise roll back to a status the server never had.
   const moveTask = (id, status) => {
-    const prevStatus = tasks.find((t) => t.id === id)?.status;
-    if (prevStatus === undefined || prevStatus === status) return;
+    const task = tasks.find((t) => t.id === id);
+    if (!task || task.status === status || saving.has(id)) return;
+    const prevStatus = task.status;
     setSaveError(null);
     setStatus(id, status);
     if (!useApi) return;
-    updateTaskStatus(id, status).catch((err) => {
-      setStatus(id, prevStatus);
-      setSaveError(`Could not save the move for ${id}; it was put back. ${err.message}`);
-    });
+    setSaving((prev) => new Set(prev).add(id));
+    updateTaskStatus(id, status)
+      .catch((err) => {
+        setStatus(id, prevStatus);
+        setSaveError(`Could not save the move for "${task.title}" (${id}); it was put back. ${err.message}`);
+      })
+      .finally(() => setSaving((prev) => { const next = new Set(prev); next.delete(id); return next; }));
   };
 
   const visible = useMemo(() => (filter === "all" ? tasks : tasks.filter((t) => t.assignee === filter)), [tasks, filter]);
@@ -494,7 +503,7 @@ function WorkBoard() {
 
                 <div className="min-h-[250px]">
                   {colTasks.map((t) => (
-                    <TaskCard key={t.id} task={t} employees={employees} onMove={moveTask} />
+                    <TaskCard key={t.id} task={t} employees={employees} onMove={moveTask} busy={saving.has(t.id)} />
                   ))}
                   {colTasks.length === 0 && (
                     <div style={{ borderColor: C.line, color: C.steel }} className="border border-dashed rounded-md p-8 text-center f-body text-xs">
@@ -515,7 +524,7 @@ function WorkBoard() {
 /* ---------------------------------------------------------------
    PAYMENTS / RECEIVABLES PAGE
 ------------------------------------------------------------------*/
-function ClientCard({ client, onCallLogged }) {
+function ClientCard({ client, onCallLogged, busy }) {
   const meta = PAY_STATUS_META[client.status];
   return (
     <div style={{ background: C.card, borderColor: C.line }} className="border rounded-md p-5 shadow-sm flex flex-col justify-between">
@@ -552,8 +561,9 @@ function ClientCard({ client, onCallLogged }) {
           {client.due > 0 && (
             <button
               onClick={() => onCallLogged(client.id)}
+              disabled={busy}
               style={{ background: C.navy, color: C.paper }}
-              className="f-body text-xs font-semibold px-3 py-1.5 rounded flex items-center gap-1.5 shadow-sm hover:opacity-90 active:scale-95 transition-all"
+              className="f-body text-xs font-semibold px-3 py-1.5 rounded flex items-center gap-1.5 shadow-sm hover:opacity-90 active:scale-95 transition-all disabled:opacity-50"
             >
               <PhoneCall size={13} /> Log Reminder
             </button>
@@ -576,8 +586,10 @@ function Payments() {
   const [load, setLoad] = useState(useApi ? { state: "loading" } : { state: "ready" });
   const [attempt, setAttempt] = useState(0);
   const [saveError, setSaveError] = useState(null);
+  const [saving, setSaving] = useState(() => new Set());
   const [filter, setFilter] = useState("all");
-  const today = new Date().toISOString().slice(0, 10);
+  // The viewer's own calendar day, so "Today" is right before 05:30 IST too.
+  const today = localDay();
 
   useEffect(() => {
     if (!useApi) return undefined;
@@ -601,18 +613,23 @@ function Payments() {
 
   const setLastCall = (id, lastCall) => setClients((prev) => prev.map((c) => (c.id === id ? { ...c, lastCall } : c)));
 
+  // One save per client at a time, so a failed save always restores a date the
+  // server really had.
   const logCall = (id) => {
-    const prevLastCall = clients.find((c) => c.id === id)?.lastCall;
-    if (prevLastCall === undefined) return;
+    const client = clients.find((c) => c.id === id);
+    if (!client || saving.has(id)) return;
+    const prevLastCall = client.lastCall;
     setSaveError(null);
     setLastCall(id, today);
     if (!useApi) return;
+    setSaving((prev) => new Set(prev).add(id));
     logClientCall(id)
       .then((updated) => setLastCall(id, updated.lastCall))
       .catch((err) => {
         setLastCall(id, prevLastCall);
-        setSaveError(`Could not save the reminder for ${id}; it was undone. ${err.message}`);
-      });
+        setSaveError(`Could not save the reminder for ${client.name}; it was undone. ${err.message}`);
+      })
+      .finally(() => setSaving((prev) => { const next = new Set(prev); next.delete(id); return next; }));
   };
 
   const totalDue = clients.reduce((s, c) => s + c.due, 0);
@@ -697,7 +714,7 @@ function Payments() {
 
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
           {visible.map((c) => (
-            <ClientCard key={c.id} client={c} onCallLogged={logCall} />
+            <ClientCard key={c.id} client={c} onCallLogged={logCall} busy={saving.has(c.id)} />
           ))}
         </div>
         </>)}
