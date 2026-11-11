@@ -4,12 +4,13 @@ import {
   createTask, updateTask, deleteTask, taskFromForm, nextLocalTaskId,
   createClient, updateClient, deleteClient, recordPayment,
   clientToApi, clientFormError, paymentError, paymentPatchBody, parseRupees, nextLocalClientId,
+  fetchSession, login, logout, onAuthLost,
 } from "./api.js";
 import {
   Ruler, Route, Building2, Droplets, Plane, Waves,
   Menu, X, ChevronRight, Clock, PhoneCall,
   Mail, Phone, MapPin, ArrowLeft,
-  ArrowRight, Filter, ChevronDown, Plus, Pencil, Trash2, CalendarDays, IndianRupee
+  ArrowRight, Filter, ChevronDown, Plus, Pencil, Trash2, CalendarDays, IndianRupee, Lock, LogOut
 } from "lucide-react";
 
 /* ---------------------------------------------------------------
@@ -127,7 +128,7 @@ const daysAgo = (s) => {
 /* ---------------------------------------------------------------
    NAVIGATION BAR
 ------------------------------------------------------------------*/
-function TopNav({ page, setPage }) {
+function TopNav({ page, setPage, onSignOut }) {
   const [open, setOpen] = useState(false);
   const items = [
     { id: "home", label: "Overview" },
@@ -164,6 +165,15 @@ function TopNav({ page, setPage }) {
               </button>
             );
           })}
+          {onSignOut && (
+            <button
+              onClick={onSignOut}
+              style={{ color: C.blueLight, borderColor: C.lineDark }}
+              className="f-body text-xs px-3 py-1.5 ml-3 font-medium rounded border flex items-center gap-1.5 hover:text-white"
+            >
+              <LogOut size={13} /> Sign out
+            </button>
+          )}
         </nav>
 
         {/* Mobile Toggle */}
@@ -196,6 +206,15 @@ function TopNav({ page, setPage }) {
               </button>
             );
           })}
+          {onSignOut && (
+            <button
+              onClick={() => { onSignOut(); setOpen(false); }}
+              style={{ color: C.blueLight }}
+              className="f-body text-sm px-4 py-3 w-full text-left font-medium flex items-center gap-2"
+            >
+              <LogOut size={15} /> Sign out
+            </button>
+          )}
         </div>
       )}
     </header>
@@ -1216,17 +1235,111 @@ function Payments() {
 }
 
 /* ---------------------------------------------------------------
+   STAFF SIGN-IN
+------------------------------------------------------------------*/
+// Whether the staff pages may be shown: "open" (no API, or the server has no
+// password set), "checking", "login", "signedIn" or "error".
+function useStaffSession() {
+  const useApi = hasApi();
+  const [session, setSession] = useState(useApi ? { state: "checking" } : { state: "open" });
+  const [attempt, setAttempt] = useState(0);
+
+  useEffect(() => {
+    if (!useApi) return undefined;
+    let cancelled = false;
+    fetchSession()
+      .then((state) => { if (!cancelled) setSession({ state }); })
+      .catch((err) => { if (!cancelled) setSession({ state: "error", message: err.message }); });
+    const stopListening = onAuthLost(() => setSession({ state: "login" }));
+    return () => { cancelled = true; stopListening(); };
+  }, [useApi, attempt]);
+
+  return {
+    session,
+    signIn: async (password) => { await login(password); setSession({ state: "signedIn" }); },
+    signOut: () => { logout(); setSession({ state: "login" }); },
+    retry: () => { setSession({ state: "checking" }); setAttempt((a) => a + 1); },
+  };
+}
+
+function SignIn({ onSignIn }) {
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+
+  const submit = (e) => {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    onSignIn(password).catch((err) => { setError(err.message); setBusy(false); });
+  };
+
+  return (
+    <form onSubmit={submit} aria-label="Staff sign in" style={{ background: C.card, borderColor: C.line }} className="w-full max-w-sm border rounded-lg shadow-sm p-6">
+      <div style={{ background: C.navy, color: C.orange }} className="w-11 h-11 rounded-full flex items-center justify-center mb-4">
+        <Lock size={18} />
+      </div>
+      <div style={{ color: C.orangeDeep }} className="f-mono text-xs font-semibold tracking-wider uppercase mb-1">Staff Only</div>
+      <h1 style={{ color: C.ink }} className="f-display text-xl font-bold mb-1">Sign in to continue</h1>
+      <p style={{ color: C.steel }} className="f-body text-sm mb-5">The work board and receivables are for NK Consultancy staff.</p>
+      <Field label="Office password" required>
+        <input
+          name="password" type="password" autoComplete="current-password" value={password}
+          onChange={(e) => setPassword(e.target.value)} required autoFocus
+          style={{ borderColor: C.line, color: C.ink }} className={INPUT_CLASS}
+        />
+      </Field>
+      {error && (
+        <div role="alert" style={{ borderColor: C.orangeDeep, background: "#FDF0EA", color: C.orangeDeep }} className="border rounded-md px-3 py-2 mt-3 f-body text-sm">
+          {error}
+        </div>
+      )}
+      <button type="submit" disabled={busy} style={{ background: C.orange, color: C.paper }} className="f-body text-sm font-semibold w-full px-5 py-2.5 mt-4 rounded shadow-sm hover:opacity-90 disabled:opacity-60">
+        {busy ? "Signing in…" : "Sign in"}
+      </button>
+    </form>
+  );
+}
+
+// Shows its children only when the staff session allows it.
+function StaffOnly({ staff, children }) {
+  const { session, signIn, retry } = staff;
+  if (session.state === "open" || session.state === "signedIn") return children;
+
+  return (
+    <div style={{ background: C.paper }} className="min-h-[calc(100vh-4rem)] grid-bg py-10 sm:py-16 px-4 flex items-start justify-center">
+      {session.state === "login" && <SignIn onSignIn={signIn} />}
+      {session.state === "checking" && (
+        <div style={{ borderColor: C.line, color: C.steel, background: C.card }} className="w-full max-w-sm border rounded-md p-8 text-center f-body text-sm">
+          Checking access…
+          <div className="text-xs mt-2">The server can take up to a minute to wake up.</div>
+        </div>
+      )}
+      {session.state === "error" && (
+        <div style={{ borderColor: C.orangeDeep, background: "#FDF0EA" }} className="w-full max-w-sm border rounded-md p-6 text-center">
+          <p style={{ color: C.orangeDeep }} className="f-body text-sm mb-3">Could not check access. {session.message}</p>
+          <button onClick={retry} style={{ background: C.navy, color: C.paper }} className="f-body text-xs font-semibold px-4 py-2 rounded shadow-sm hover:opacity-90">
+            Retry
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------------
    MAIN APP EXPORT
 ------------------------------------------------------------------*/
 export default function App() {
   const [page, setPage] = useState("home");
+  const staff = useStaffSession();
   return (
     <div className="f-body w-full min-h-screen antialiased" style={{ background: C.paper }}>
-      <TopNav page={page} setPage={setPage} />
+      <TopNav page={page} setPage={setPage} onSignOut={staff.session.state === "signedIn" ? staff.signOut : null} />
       <main>
         {page === "home" && <Landing setPage={setPage} />}
-        {page === "work" && <WorkBoard />}
-        {page === "payments" && <Payments />}
+        {page === "work" && <StaffOnly staff={staff}><WorkBoard /></StaffOnly>}
+        {page === "payments" && <StaffOnly staff={staff}><Payments /></StaffOnly>}
       </main>
     </div>
   );

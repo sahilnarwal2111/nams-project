@@ -54,7 +54,7 @@ Everything else lives in `apps/frontend/src/App.jsx` (~650 lines), top to bottom
 1. `C` — design-token object of hex colors used via inline `style={{ }}` for brand colors, layered with Tailwind utility classes for layout and spacing. Brand colors go through `C`, everything else through Tailwind. Keep that split.
 2. Mock data (`SERVICES`, `EMPLOYEES`, `INITIAL_TASKS`, `INITIAL_CLIENTS`) and `*_META` lookups (`STATUS_META`, `PRIORITY_META`, `PAY_STATUS_META`, plus the `WORK_TYPES` list) mapping enum values to label/color. These literal enum values are the contract with the API — see below.
 3. Page components: `TopNav`, `Landing`, `WorkBoard` (move-left/move-right buttons, no drag; a `WorkForm` dialog creates, edits and deletes work items, in mock mode too), `Payments` (call logging; `ClientForm` adds, edits and deletes clients and `PaymentForm` records money received, which reduces the dues and marks a cleared account as paid). The dialogs share `Modal`, `useDialogAction`, `DeleteControl` and `DialogButtons`.
-4. `App` — page switching via a `useState` string (`home` / `work` / `payments`). There is no router, so back/forward and deep links do not work.
+4. `App` — page switching via a `useState` string (`home` / `work` / `payments`). There is no router, so back/forward and deep links do not work. `useStaffSession` asks the API whether sign-in is required and `StaffOnly` wraps the Work Board and Payments pages: it shows `SignIn` when a password is set on the server and the browser has no valid token. The landing page is always public. The token lives in `localStorage` (`api.js`), and any 401 clears it and returns to the sign-in screen.
 
 Styling: Tailwind v4 via `@tailwindcss/vite`, entry `src/index.css`, which also defines the custom classes (`f-display`, `f-body`, `f-mono`, `contour-bg`, `grid-bg`, `card-hover`, `no-scrollbar`) and imports Google Fonts. **The Google Fonts `@import` must stay above `@import "tailwindcss"`** — CSS requires all `@import`s before other rules and Tailwind's import expands into generated rules, so reversing them breaks the build.
 
@@ -80,6 +80,8 @@ Endpoints today (all under `/api`):
 | Method and path | Request body | Success | Errors |
 | --- | --- | --- | --- |
 | `GET /api/health` | none | 200 `{ status: "ok" }` | none |
+| `GET /api/auth/session` | none | 200 `{ required, authenticated }`; never 401 | none |
+| `POST /api/auth/login` | `{ password }` | 200 `{ token, expiresAt }` | 400 if login is switched off, 401 on a wrong password, 429 after 8 wrong attempts from one address (15-minute wait) |
 | `GET /api/employees` | none | 200, list of employees | none |
 | `GET /api/tasks` | none | 200, list of tasks | none |
 | `GET /api/tasks/:id` | none | 200, the task | 404 if the task is unknown |
@@ -92,6 +94,8 @@ Endpoints today (all under `/api`):
 | `DELETE /api/clients/:id` | none | 204, no body; permanently deletes | 404 `{ error }` if the client is unknown |
 
 Work details on a task (all optional, from the "new work" form): `customerPhone`, `district`, `department`, `details` (strings; blank or `null` clears), `workTypes` (a list drawn from `survey`, `x-section`, `drawing`, `design`, `printout`; returned in that fixed order), `expectedCompletion` (`YYYY-MM-DD` or an ISO timestamp; `null` or `""` clears).
+
+Staff sign-in (`src/lib/auth.js`): one shared password in the `APP_PASSWORD` environment variable. While it is unset the API is open, which is the local and test default. Once set, every endpoint except `/api/health` and `/api/auth/*` needs `Authorization: Bearer <token>` and answers 401 without it. Tokens last 30 days and are signed with a key derived from the password, so changing `APP_PASSWORD` signs everyone out. There are no user accounts or roles yet.
 
 Design decisions to preserve:
 
@@ -124,6 +128,6 @@ Backend: Render free web service (Singapore) with the database on Neon's free pl
 - The frontend uses the hosted API only when `VITE_API_URL` is set in the Vercel project settings.
 - Seeding is a one-time manual step: `DATABASE_URL=<neon url> npm run prisma:seed` from a laptop. Do not add the seed to the build: it upserts and would overwrite edits to the seeded records on every deploy.
 - The free web service sleeps after 15 idle minutes, so the first request after a quiet spell can take up to a minute.
-- The API has no login yet. Keep real client data off the hosted database until it does.
+- `APP_PASSWORD` in the Render dashboard switches staff sign-in on. Until it is set the hosted API is open to anyone, so keep real client data off it.
 
 The remote also has a stale `master` branch holding only the first commit; `main` is the default.

@@ -584,3 +584,117 @@ test("DELETE /api/clients/:id returns 404 for an unknown client", async () => {
   assert.match((await res.json()).error, /c9999/);
   assert.equal(await clientCount(), n);
 });
+
+/* ---- staff login ------------------------------------------------- */
+
+import { clearFailedLogins, issueToken, MAX_FAILED_LOGINS, TOKEN_TTL_MS } from "../src/lib/auth.js";
+
+const PASSWORD = "test-office-password";
+const authed = (path, token, options = {}) =>
+  fetch(base + path, { ...options, headers: { ...options.headers, authorization: `Bearer ${token}` } });
+const signIn = async (password) => post("/api/auth/login", { password });
+
+// Switches login on for one test and always switches it back off, because the
+// rest of this file expects an open API.
+async function withLogin(fn) {
+  process.env.APP_PASSWORD = PASSWORD;
+  clearFailedLogins();
+  try {
+    await fn();
+  } finally {
+    delete process.env.APP_PASSWORD;
+    clearFailedLogins();
+  }
+}
+
+test("with no APP_PASSWORD the API is open and the session says login is not required", async () => {
+  assert.equal(process.env.APP_PASSWORD, undefined);
+  assert.deepEqual(await (await get("/api/auth/session")).json(), { required: false, authenticated: false });
+  assert.equal((await get("/api/tasks")).status, 200);
+  assert.equal((await signIn("anything")).status, 400);
+});
+
+test("with APP_PASSWORD set, data endpoints need a token but health and session do not", async () => {
+  await withLogin(async () => {
+    for (const path of ["/api/tasks", "/api/tasks/NK-101", "/api/clients", "/api/employees"]) {
+      const res = await get(path);
+      assert.equal(res.status, 401, path);
+      assert.equal(typeof (await res.json()).error, "string");
+    }
+    assert.equal((await post("/api/tasks", validTask)).status, 401);
+    assert.equal((await patch("/api/tasks/NK-102", { status: "done" })).status, 401);
+    assert.equal((await fetch(`${base}/api/clients/c1`, { method: "DELETE" })).status, 401);
+    assert.equal((await get("/api/health")).status, 200);
+    assert.deepEqual(await (await get("/api/auth/session")).json(), { required: true, authenticated: false });
+  });
+  assert.equal(await prisma.client.count({ where: { id: "c1" } }), 1, "an unauthenticated delete went through");
+});
+
+test("the right password gives a token that opens the API", async () => {
+  await withLogin(async () => {
+    const res = await signIn(PASSWORD);
+    assert.equal(res.status, 200);
+    const { token, expiresAt } = await res.json();
+    assert.ok(Date.parse(expiresAt) > Date.now() + TOKEN_TTL_MS - 60_000);
+
+    assert.equal((await authed("/api/tasks", token)).status, 200);
+    assert.equal((await authed("/api/clients", token)).status, 200);
+    assert.deepEqual(await (await authed("/api/auth/session", token)).json(), { required: true, authenticated: true });
+  });
+});
+
+test("a wrong or missing password is refused", async () => {
+  await withLogin(async () => {
+    for (const password of ["wrong", "", PASSWORD + " ", PASSWORD.toUpperCase(), undefined, 12345, null]) {
+      const res = await signIn(password);
+      assert.equal(res.status, 401, JSON.stringify(password));
+      assert.equal((await res.json()).token, undefined);
+    }
+  });
+});
+
+test("forged, altered and expired tokens are refused", async () => {
+  await withLogin(async () => {
+    const { token } = issueToken();
+    const [expires, signature] = token.split(".");
+    const expired = issueToken(Date.now() - TOKEN_TTL_MS - 1000).token;
+    const bad = [
+      "",
+      "garbage",
+      `${Number(expires) + 1000}.${signature}`,
+      `${expires}.${signature.slice(0, -2)}xx`,
+      `${expires}.`,
+      `${expires}.${signature}.extra`,
+      expired,
+    ];
+    for (const t of bad) {
+      assert.equal((await authed("/api/tasks", t)).status, 401, t);
+    }
+    assert.equal((await authed("/api/tasks", token)).status, 200);
+    assert.equal((await fetch(`${base}/api/tasks`, { headers: { authorization: token } })).status, 401, "needs the Bearer prefix");
+  });
+});
+
+test("a token stops working when the password changes", async () => {
+  await withLogin(async () => {
+    const { token } = await (await signIn(PASSWORD)).json();
+    process.env.APP_PASSWORD = "a-new-password";
+    assert.equal((await authed("/api/tasks", token)).status, 401);
+    process.env.APP_PASSWORD = PASSWORD;
+    assert.equal((await authed("/api/tasks", token)).status, 200);
+  });
+});
+
+test("repeated wrong passwords are locked out, even with the right one afterwards", async () => {
+  await withLogin(async () => {
+    for (let i = 0; i < MAX_FAILED_LOGINS; i++) {
+      assert.equal((await signIn("wrong")).status, 401);
+    }
+    const blocked = await signIn(PASSWORD);
+    assert.equal(blocked.status, 429);
+    assert.match((await blocked.json()).error, /Too many/);
+
+    clearFailedLogins();
+    assert.equal((await signIn(PASSWORD)).status, 200);
+  });
+});
