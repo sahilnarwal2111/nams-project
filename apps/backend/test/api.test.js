@@ -1500,3 +1500,310 @@ test("the session lists every profile once sign-in is on, with nobody ready unti
     for (const p of people) assert.deepEqual(Object.keys(p).sort(), ["hasPassword", "id", "name"]);
   });
 });
+
+/* ---- activity log ------------------------------------------------------ */
+
+const newestLogId = async () => (await prisma.activityLog.findFirst({ orderBy: { id: "desc" }, select: { id: true } }))?.id ?? 0;
+const logSince = (id) => prisma.activityLog.findMany({ where: { id: { gt: id } }, orderBy: { id: "asc" } });
+const activityFor = async (token, query) => (await authed(`/api/activity?${query}`, token)).json();
+// Numbers are reused after a delete (highest + 1), so a record's history can
+// include an earlier record with the same number. These tests look only at
+// what was written after `mark`.
+const historyOf = async (token, entityType, entityId, mark, extra = "") =>
+  (await activityFor(token, `entityType=${entityType}&entityId=${entityId}&limit=200${extra}`)).entries.filter((e) => e.id > mark);
+const brief = (entries) => entries.map((e) => `${e.action} by ${e.actorName}`);
+
+test("the activity log records who added, moved, edited, reassigned and deleted work, with before and after", async () => {
+  await withPeople(async ({ admin, staff, ankit, rajesh }) => {
+    const started = Date.now();
+    const mark = await newestLogId();
+    const created = await authed("/api/tasks", ankit, jsonBody("POST", { ...validTask, title: "Logged work", assigneeId: "e6", priority: "low" }));
+    assert.equal(created.status, 201);
+    const { id } = await created.json();
+    try {
+      assert.equal((await authed(`/api/tasks/${id}`, rajesh, jsonBody("PATCH", { status: "done" }))).status, 200);
+      assert.equal((await authed(`/api/tasks/${id}`, staff, jsonBody("PATCH", { status: "inprogress" }))).status, 200);
+      assert.equal((await authed(`/api/tasks/${id}`, ankit, jsonBody("PATCH", { priority: "high", district: "Jind" }))).status, 200);
+      assert.equal((await authed(`/api/tasks/${id}`, admin, jsonBody("PATCH", { assigneeId: "e4" }))).status, 200);
+      assert.equal((await authed(`/api/tasks/${id}`, admin, { method: "DELETE" })).status, 204);
+
+      const entries = await historyOf(admin, "task", id, mark);
+      assert.deepEqual(brief(entries), [
+        "task.deleted by Admin",
+        "task.updated by Admin",
+        "task.updated by Ankit",
+        "task.moved by Office sign-in",
+        "task.moved by Rajesh Kumar",
+        "task.created by Ankit",
+      ]);
+      const [deleted, reassigned, edited, officeMove, move, added] = entries;
+
+      assert.deepEqual([added.actorType, added.actorId], ["person", "e6"]);
+      assert.deepEqual([move.actorType, move.actorId], ["person", "e4"]);
+      assert.deepEqual([officeMove.actorType, officeMove.actorId], ["office", null]);
+      assert.deepEqual([deleted.actorType, deleted.actorId], ["admin", null]);
+
+      assert.equal(added.summary, `Added ${id} “Logged work”, assigned to Ankit`);
+      assert.deepEqual(added.changes.title, { from: null, to: "Logged work" });
+      assert.deepEqual(added.changes.status, { from: null, to: "todo" });
+
+      assert.equal(move.summary, `Moved ${id} “Logged work” from To Do to Completed`);
+      assert.deepEqual(move.changes.status, { from: "todo", to: "done" });
+      assert.deepEqual(Object.keys(move.changes).sort(), ["completedAt", "status"]);
+      assert.equal(officeMove.summary, `Moved ${id} “Logged work” from Completed to In Progress`);
+
+      assert.equal(edited.summary, `Edited ${id} “Logged work”: changed priority, district`);
+      assert.deepEqual(edited.changes, { priority: { from: "low", to: "high" }, district: { from: null, to: "Jind" } });
+
+      assert.equal(reassigned.summary, `Edited ${id} “Logged work”: reassigned from Ankit to Rajesh Kumar`);
+      assert.deepEqual(reassigned.changes, { assigneeId: { from: "e6", to: "e4" } });
+
+      // A deleted record can be read back from its last entry.
+      assert.equal(deleted.summary, `Deleted ${id} “Logged work”`);
+      assert.deepEqual(deleted.changes.title, { from: "Logged work", to: null });
+      assert.deepEqual(deleted.changes.assigneeId, { from: "e4", to: null });
+      assert.deepEqual(deleted.changes.district, { from: "Jind", to: null });
+
+      for (const entry of entries) {
+        assert.ok(entry.ip, "each entry says where it came from");
+        const at = new Date(entry.at).getTime();
+        assert.ok(at >= started - 2000 && at <= Date.now() + 2000, `time set by the server: ${entry.at}`);
+        assert.ok(!("updatedAt" in entry.changes), "bookkeeping fields are not logged");
+      }
+    } finally {
+      await prisma.task.deleteMany({ where: { id } });
+    }
+  });
+});
+
+test("a refused, invalid or unchanged save leaves no entry in the activity log", async () => {
+  await withPeople(async ({ admin, staff, rajesh }) => {
+    const task = await prisma.task.findUnique({ where: { id: "NK-102" } });
+    const mark = await newestLogId();
+    // NK-102 is Ankit's: Rajesh and the office sign-in may not edit its details.
+    assert.equal((await authed("/api/tasks/NK-102", rajesh, jsonBody("PATCH", { title: "Mine now" }))).status, 403);
+    assert.equal((await authed("/api/tasks/NK-102", staff, jsonBody("PATCH", { priority: "high" }))).status, 403);
+    assert.equal((await authed("/api/tasks/NK-102", staff, { method: "DELETE" })).status, 403);
+    assert.equal((await authed("/api/tasks/NK-102", admin, jsonBody("PATCH", { priority: "urgent" }))).status, 400);
+    assert.equal((await authed("/api/tasks/NK-999", admin, jsonBody("PATCH", { status: "done" }))).status, 404);
+    assert.equal((await authed("/api/tasks/NK-999", admin, { method: "DELETE" })).status, 404);
+    assert.equal((await authed("/api/clients/c1", staff, jsonBody("PATCH", { due: 1 }))).status, 403);
+    assert.equal((await authed("/api/clients/c1/payments", admin, jsonBody("POST", { amount: 10 ** 9 }))).status, 400);
+    assert.equal((await authed("/api/enquiries/999999", admin, jsonBody("PATCH", { status: "closed" }))).status, 404);
+    // Saving the same values again is not a change.
+    const same = { status: task.status, priority: task.priority, title: task.title };
+    assert.equal((await authed("/api/tasks/NK-102", admin, jsonBody("PATCH", same))).status, 200);
+    assert.deepEqual(brief(await logSince(mark)), []);
+  });
+});
+
+test("a change is not saved if its activity entry cannot be written", async () => {
+  const task = await prisma.task.findUnique({ where: { id: "NK-102" } });
+  // Make the database refuse this one kind of entry, for this test only.
+  await prisma.$executeRawUnsafe(`ALTER TABLE "ActivityLog" ADD CONSTRAINT "test_refuse_moves" CHECK (action <> 'task.moved') NOT VALID`);
+  try {
+    const res = await patch("/api/tasks/NK-102", { status: task.status === "done" ? "todo" : "done" });
+    assert.equal(res.status, 500);
+    assert.equal((await prisma.task.findUnique({ where: { id: "NK-102" } })).status, task.status, "the move was rolled back");
+  } finally {
+    await prisma.$executeRawUnsafe(`ALTER TABLE "ActivityLog" DROP CONSTRAINT "test_refuse_moves"`);
+    await prisma.task.update({ where: { id: "NK-102" }, data: { status: task.status, completedAt: task.completedAt } });
+  }
+});
+
+test("client records, reminder calls and payments are logged with their amounts", async () => {
+  await withRoles(async ({ admin, staff }) => {
+    const mark = await newestLogId();
+    const created = await authed("/api/clients", admin, jsonBody("POST", validClient));
+    assert.equal(created.status, 201);
+    const { id } = await created.json();
+    try {
+      assert.equal((await authed(`/api/clients/${id}`, staff, jsonBody("PATCH", {}))).status, 200);
+      assert.equal((await authed(`/api/clients/${id}`, admin, jsonBody("PATCH", { due: 10000, notes: "Revised" }))).status, 200);
+      assert.equal((await authed(`/api/clients/${id}/payments`, admin, jsonBody("POST", { amount: 4000, note: "Cheque" }))).status, 201);
+      assert.equal((await authed(`/api/clients/${id}/payments`, admin, jsonBody("POST", { amount: 6000 }))).status, 201);
+      assert.equal((await authed(`/api/clients/${id}`, admin, { method: "DELETE" })).status, 204);
+
+      const entries = await historyOf(admin, "client", id, mark);
+      assert.deepEqual(brief(entries), [
+        "client.deleted by Admin",
+        "payment.recorded by Admin",
+        "payment.recorded by Admin",
+        "client.updated by Admin",
+        "client.call_logged by Office sign-in",
+        "client.created by Admin",
+      ]);
+      const [deleted, cleared, firstPayment, edited, call, added] = entries;
+      assert.equal(added.summary, "Added client “Test Client” with ₹12,000 due");
+      assert.deepEqual(added.changes.due, { from: null, to: 12000 });
+      assert.equal(call.summary, "Logged a reminder call to “Test Client”");
+      assert.deepEqual(Object.keys(call.changes), ["lastCall"]);
+      assert.equal(edited.summary, "Edited client “Test Client”: changed amount due, notes");
+      assert.deepEqual(edited.changes, { due: { from: 12000, to: 10000 }, notes: { from: null, to: "Revised" } });
+      assert.equal(firstPayment.summary, "Recorded ₹4,000 received from “Test Client”; ₹6,000 still due");
+      assert.deepEqual(firstPayment.changes.due, { from: 10000, to: 6000 });
+      assert.deepEqual(firstPayment.changes.note, { from: null, to: "Cheque" });
+      assert.ok(!("status" in firstPayment.changes));
+      assert.deepEqual(cleared.changes.due, { from: 6000, to: 0 });
+      assert.deepEqual(cleared.changes.status, { from: "due-soon", to: "paid" });
+      // Deleting a client deletes its payments; the entry keeps both.
+      assert.equal(deleted.summary, "Deleted client “Test Client” with ₹0 due and 2 recorded payments");
+      assert.deepEqual(deleted.changes.payments.from.map((p) => [p.amount, p.note]), [[4000, "Cheque"], [6000, null]]);
+      assert.deepEqual(deleted.changes.name, { from: "Test Client", to: null });
+
+      assert.deepEqual(brief(await historyOf(admin, "client", id, mark, "&type=payment")), [
+        "payment.recorded by Admin",
+        "payment.recorded by Admin",
+      ]);
+    } finally {
+      await prisma.client.deleteMany({ where: { id } });
+    }
+  });
+});
+
+test("an enquiry is logged from the website visitor through to its deletion", async () => {
+  await cleanEnquiries();
+  try {
+    const mark = await newestLogId();
+    assert.equal((await post("/api/enquiries", { name: ENQ_NAME, phone: "98765 43210", message: "Survey needed" })).status, 201);
+    // A script filling the hidden field is answered but stores and logs nothing.
+    assert.equal((await post("/api/enquiries", { name: ENQ_NAME, phone: "98765 43210", website: "spam" })).status, 201);
+    const [{ id }] = await (await get("/api/enquiries")).json();
+    assert.equal((await patch(`/api/enquiries/${id}`, { status: "contacted" })).status, 200);
+    assert.equal((await patch(`/api/enquiries/${id}`, { status: "contacted" })).status, 200);
+    assert.equal((await del(`/api/enquiries/${id}`)).status, 204);
+
+    const entries = await logSince(mark);
+    assert.deepEqual(brief(entries), [
+      "enquiry.received by Website visitor",
+      "enquiry.status_changed by Sign-in switched off",
+      "enquiry.deleted by Sign-in switched off",
+    ]);
+    const [received, changed, deleted] = entries;
+    assert.deepEqual([received.actorType, received.entityId], ["public", String(id)]);
+    assert.deepEqual(received.changes.phone, { from: null, to: "98765 43210" });
+    assert.equal(changed.actorType, "open");
+    assert.deepEqual(changed.changes, { status: { from: "new", to: "contacted" } });
+    assert.equal(deleted.summary, `Deleted the enquiry from “${ENQ_NAME}” (98765 43210)`);
+    assert.deepEqual(deleted.changes.message, { from: "Survey needed", to: null });
+  } finally {
+    await cleanEnquiries();
+  }
+});
+
+test("sign-ins and password changes are logged, right and wrong, and never hold a password", async () => {
+  const mark = await newestLogId();
+  await withPeople(async ({ admin }) => {
+    assert.equal((await post("/api/auth/login", { as: "e6", password: "not-ankits-password" })).status, 401);
+    assert.equal((await post("/api/auth/login", { as: "e999", password: "whatever-123" })).status, 401);
+    assert.equal((await signIn("not-a-shared-password")).status, 401);
+    assert.equal((await authed("/api/employees/e6/password", admin, jsonBody("PUT", { password: "ankit-second-pass" }))).status, 204);
+    assert.equal((await authed("/api/employees/e6/password", admin, { method: "DELETE" })).status, 204);
+    assert.equal((await authed("/api/employees/e6/password", admin, { method: "DELETE" })).status, 204);
+  });
+  const entries = await logSince(mark);
+  assert.deepEqual(
+    entries.map((e) => `${e.actorType}: ${e.summary}`),
+    [
+      "office: Office sign-in signed in",
+      "admin: Admin signed in",
+      "admin: Set Ankit's sign-in password",
+      "admin: Set Rajesh Kumar's sign-in password",
+      "person: Ankit signed in",
+      "person: Rajesh Kumar signed in",
+      "unknown: Wrong password for Ankit's sign-in",
+      "unknown: Wrong password for a sign-in that does not exist",
+      "unknown: Wrong password for the office or admin sign-in",
+      "admin: Changed Ankit's sign-in password",
+      "admin: Removed Ankit's sign-in password",
+    ]
+  );
+  assert.deepEqual(entries.filter((e) => e.action === "session.sign_in_failed").map((e) => e.entityId), ["e6", null, "shared"]);
+  const everything = JSON.stringify(entries);
+  for (const secret of [PASSWORD, ADMIN_PASSWORD, ANKIT_PASSWORD, RAJESH_PASSWORD, "ankit-second-pass", "not-ankits-password", "scrypt$"]) {
+    assert.ok(!everything.includes(secret), `the log must not hold ${secret}`);
+  }
+});
+
+test("the attempt that locks an address out says so in the log", async () => {
+  await withLogin(async () => {
+    const mark = await newestLogId();
+    for (let i = 0; i < MAX_FAILED_LOGINS; i++) assert.equal((await signIn(`wrong-${i}`)).status, 401);
+    assert.equal((await signIn("wrong-again")).status, 429);
+    const entries = await logSince(mark);
+    assert.equal(entries.length, MAX_FAILED_LOGINS, "attempts refused by the lockout are not logged");
+    assert.match(entries.at(-1).summary, /attempt 8, so this address is locked out for 15 minutes$/);
+    assert.ok(!entries[0].summary.includes("locked out"));
+  });
+});
+
+test("GET /api/activity is for the admin only", async () => {
+  await withPeople(async ({ admin, staff, ankit }) => {
+    assert.equal((await get("/api/activity")).status, 401);
+    assert.equal((await authed("/api/activity", staff)).status, 403);
+    assert.equal((await authed("/api/activity", ankit)).status, 403);
+    const res = await authed("/api/activity", admin);
+    assert.equal(res.status, 200);
+    const { entries } = await res.json();
+    assert.ok(entries.length > 0);
+    assert.deepEqual(Object.keys(entries[0]).sort(), [
+      "action", "actorId", "actorName", "actorType", "at", "changes", "entityId", "entityType", "id", "ip", "summary", "userAgent",
+    ]);
+  });
+});
+
+test("GET /api/activity pages newest first and filters by person and by kind", async () => {
+  await withPeople(async ({ admin, ankit }) => {
+    const mark = await newestLogId();
+    for (const status of ["inprogress", "done", "todo"]) {
+      assert.equal((await authed("/api/tasks/NK-102", ankit, jsonBody("PATCH", { status }))).status, 200);
+    }
+    try {
+      const first = await activityFor(admin, "actor=e6&type=task&limit=2");
+      assert.deepEqual(first.entries.map((e) => e.changes.status.to), ["todo", "done"]);
+      assert.equal(first.nextBefore, first.entries[1].id);
+      const second = await activityFor(admin, `actor=e6&type=task&limit=2&before=${first.nextBefore}`);
+      assert.equal(second.entries[0].changes.status.to, "inprogress");
+      assert.ok(second.entries.every((e) => e.id < first.nextBefore && e.actorId === "e6" && e.action.startsWith("task.")));
+
+      const all = (await activityFor(admin, "limit=200")).entries;
+      assert.deepEqual(all.map((e) => e.id), all.map((e) => e.id).sort((a, b) => b - a), "newest first");
+      assert.ok((await activityFor(admin, "actor=admin")).entries.every((e) => e.actorType === "admin"));
+      assert.ok((await activityFor(admin, "type=session")).entries.every((e) => e.action.startsWith("session.")));
+      assert.deepEqual((await activityFor(admin, "actor=e999")).entries, []);
+      assert.equal((await activityFor(admin, "limit=5000")).entries.length <= 200, true);
+
+      for (const query of ["limit=0", "limit=abc", "before=x", "type=money", "entityType=task", "entityId=NK-102", "entityType=nope&entityId=1", "actor=e1&actor=e2"]) {
+        assert.equal((await authed(`/api/activity?${query}`, admin)).status, 400, query);
+      }
+    } finally {
+      const task = await prisma.task.findUnique({ where: { id: "NK-102" } });
+      assert.equal(task.status, "todo");
+      assert.ok((await logSince(mark)).length >= 3);
+    }
+  });
+});
+
+test("the activity log cannot be edited or emptied: there is no route, and the database refuses", async () => {
+  await post("/api/enquiries", { name: ENQ_NAME, phone: "98765 43210" });
+  try {
+    const entry = await prisma.activityLog.findFirst({ orderBy: { id: "desc" } });
+    for (const [method, path] of [
+      ["POST", "/api/activity"],
+      ["PATCH", `/api/activity/${entry.id}`],
+      ["PUT", `/api/activity/${entry.id}`],
+      ["DELETE", `/api/activity/${entry.id}`],
+      ["DELETE", "/api/activity"],
+    ]) {
+      assert.equal((await fetch(base + path, jsonBody(method, { summary: "nothing happened" }))).status, 404, `${method} ${path}`);
+    }
+    const refused = /append-only/;
+    await assert.rejects(prisma.activityLog.update({ where: { id: entry.id }, data: { summary: "nothing happened" } }), refused);
+    await assert.rejects(prisma.activityLog.delete({ where: { id: entry.id } }), refused);
+    await assert.rejects(prisma.activityLog.deleteMany({}), refused);
+    await assert.rejects(prisma.$executeRawUnsafe(`TRUNCATE "ActivityLog"`), refused);
+    assert.deepEqual(await prisma.activityLog.findUnique({ where: { id: entry.id } }), entry);
+  } finally {
+    await cleanEnquiries();
+  }
+});

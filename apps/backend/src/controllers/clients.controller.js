@@ -1,6 +1,8 @@
 import { prisma } from "../lib/prisma.js";
 import { parseDate } from "../lib/dates.js";
 import { ADMIN_ONLY_MESSAGE } from "../lib/auth.js";
+import { diff, inTransaction, lockAndFind, logActivity, quoted, rupees } from "../lib/activity.js";
+import { HttpError, sendHttpError } from "../lib/httpError.js";
 
 // What a viewer may see of a client: only an admin gets the amount due. Staff
 // still get the status, so they know whether payment is received or pending.
@@ -63,18 +65,19 @@ export async function createClient(req, res) {
   // Retry if a concurrent request grabbed the same id (unique violation).
   for (let attempt = 0; attempt < 5; attempt++) {
     try {
-      const client = await prisma.client.create({
-        data: {
-          id: await nextClientId(),
-          name: name.trim(),
-          contact: contact.trim(),
-          phone: phone.trim(),
-          due,
-          invoiceDate,
-          lastCall,
-          status,
-          notes,
-        },
+      const id = await nextClientId();
+      const client = await inTransaction(async (tx) => {
+        const created = await tx.client.create({
+          data: { id, name: name.trim(), contact: contact.trim(), phone: phone.trim(), due, invoiceDate, lastCall, status, notes },
+        });
+        await logActivity(tx, req, {
+          action: "client.created",
+          entityType: "client",
+          entityId: created.id,
+          summary: `Added client ${quoted(created.name)} with ${rupees(created.due)} due`,
+          changes: diff(null, created),
+        });
+        return created;
       });
       return res.status(201).json(client);
     } catch (err) {
@@ -90,6 +93,7 @@ export async function listClients(req, res) {
 }
 
 const EDITABLE_FIELDS = ["name", "contact", "phone", "due", "invoiceDate", "lastCall", "status", "notes"];
+const CLIENT_FIELD_LABELS = { due: "amount due", invoiceDate: "invoice date", lastCall: "last call" };
 
 // Validates the editable fields present in body, applying the same rules as POST.
 // Returns { data } or { error }. `id` and unknown keys are ignored.
@@ -130,25 +134,63 @@ export async function updateClient(req, res) {
   const { data, error } = parseClientPatch(req.body ?? {});
   if (error) return res.status(400).json({ error });
   // Logging a call is open to all staff; editing the record is not.
-  if (Object.keys(data).length === 0) data.lastCall = new Date();
+  const callOnly = Object.keys(data).length === 0;
+  if (callOnly) data.lastCall = new Date();
   else if (req.role !== "admin") return res.status(403).json({ error: ADMIN_ONLY_MESSAGE });
 
   try {
-    const client = await prisma.client.update({ where: { id }, data });
+    const client = await inTransaction(async (tx) => {
+      const before = await lockAndFind(tx, "client", id);
+      if (!before) throw new HttpError(404, `Client ${id} not found`);
+      const updated = await tx.client.update({ where: { id }, data });
+      const changes = diff(before, updated);
+      if (changes) {
+        const fields = Object.keys(changes).map((field) => CLIENT_FIELD_LABELS[field] ?? field);
+        await logActivity(tx, req, {
+          action: callOnly ? "client.call_logged" : "client.updated",
+          entityType: "client",
+          entityId: id,
+          summary: callOnly
+            ? `Logged a reminder call to ${quoted(updated.name)}`
+            : `Edited client ${quoted(updated.name)}: changed ${fields.join(", ")}`,
+          changes,
+        });
+      }
+      return updated;
+    });
     res.json(forRole(client, req.role));
   } catch (err) {
-    if (err.code === "P2025") return res.status(404).json({ error: `Client ${id} not found` });
-    throw err;
+    sendHttpError(res, err);
   }
 }
 
 export async function deleteClient(req, res) {
   const { id } = req.params;
   try {
-    await prisma.client.delete({ where: { id } });
+    await inTransaction(async (tx) => {
+      const before = await lockAndFind(tx, "client", id);
+      if (!before) throw new HttpError(404, `Client ${id} not found`);
+      // Deleting a client deletes its payments, so they go into the log too.
+      const payments = await tx.payment.findMany({
+        where: { clientId: id },
+        orderBy: [{ receivedAt: "asc" }, { id: "asc" }],
+        select: { id: true, amount: true, receivedAt: true, note: true },
+      });
+      await tx.client.delete({ where: { id } });
+      const changes = diff(before, null);
+      if (payments.length > 0) changes.payments = { from: payments, to: null };
+      await logActivity(tx, req, {
+        action: "client.deleted",
+        entityType: "client",
+        entityId: id,
+        summary:
+          `Deleted client ${quoted(before.name)} with ${rupees(before.due)} due` +
+          (payments.length > 0 ? ` and ${payments.length} recorded payment${payments.length === 1 ? "" : "s"}` : ""),
+        changes,
+      });
+    });
     res.status(204).end();
   } catch (err) {
-    if (err.code === "P2025") return res.status(404).json({ error: `Client ${id} not found` });
-    throw err;
+    sendHttpError(res, err);
   }
 }

@@ -6,6 +6,7 @@ import {
   clientToApi, clientFormError, paymentError, paymentPatchBody, parseRupees, nextLocalClientId,
   fetchSession, login, logout, onAuthLost,
   daysAgo, paymentPending, enquiryError,
+  fetchActivity,
   fetchTeam, canEditTask, viewerLabel, signInChoices, defaultSignInChoice, personalPasswordError, setEmployeePassword, clearEmployeePassword, sendEnquiry, fetchEnquiries, updateEnquiryStatus, deleteEnquiry,
 } from "./api.js";
 import {
@@ -13,11 +14,12 @@ import {
   boardTasks, completedTasks, completedByMonth, RECENT_DAYS,
 } from "./board.js";
 import { pageFromHash, hashForPage, anchorFromHash } from "./route.js";
+import { KIND_FILTERS, kindLabel, actorFilters, groupByDay, changeRows, deviceLabel, dayOf, dayLabel, timeLabel } from "./activity.js";
 import {
   Ruler, Route, Building2, Droplets, Plane, Waves,
   Menu, X, ChevronRight, Clock, PhoneCall,
   Mail, Phone, MapPin, ArrowLeft,
-  ArrowRight, Filter, ChevronDown, Plus, Pencil, Trash2, CalendarDays, IndianRupee, Lock, LogOut, History, Search, CircleCheck, Send, MessageSquare, KeyRound, UserRound, Eye, Info
+  ArrowRight, Filter, ChevronDown, Plus, Pencil, Trash2, CalendarDays, IndianRupee, Lock, LogOut, History, Search, CircleCheck, Send, MessageSquare, KeyRound, UserRound, Eye, Info, ScrollText, RefreshCw
 } from "lucide-react";
 
 /* ---------------------------------------------------------------
@@ -141,7 +143,7 @@ const fmtDate = (s) => new Date(s + "T00:00:00").toLocaleDateString("en-IN", { d
 /* ---------------------------------------------------------------
    NAVIGATION BAR
 ------------------------------------------------------------------*/
-function TopNav({ page, setPage, onSignOut, userName, showTeam }) {
+function TopNav({ page, setPage, onSignOut, userName, showTeam, showActivity }) {
   const [open, setOpen] = useState(false);
   const items = [
     { id: "home", label: "Overview" },
@@ -149,6 +151,7 @@ function TopNav({ page, setPage, onSignOut, userName, showTeam }) {
     { id: "payments", label: "Receivables" },
     { id: "enquiries", label: "Enquiries" },
     ...(showTeam ? [{ id: "team", label: "Team" }] : []),
+    ...(showActivity ? [{ id: "activity", label: "Activity" }] : []),
   ];
 
   return (
@@ -161,8 +164,8 @@ function TopNav({ page, setPage, onSignOut, userName, showTeam }) {
           <div style={{ color: C.paper }} className="f-display text-base font-bold tracking-tight leading-none">NK Consultancy</div>
         </button>
 
-        {/* Desktop Menu */}
-        <nav className="hidden md:flex items-center gap-1">
+        {/* Desktop menu: from 1024px, where every item, Sign out and the name fit on one line. */}
+        <nav className="hidden lg:flex items-center gap-1">
           {items.map((it) => {
             const active = page === it.id || (it.id === "work" && page === "completed");
             return (
@@ -198,7 +201,7 @@ function TopNav({ page, setPage, onSignOut, userName, showTeam }) {
 
         {/* Mobile Toggle */}
         <button
-          className="md:hidden p-2 rounded text-white"
+          className="lg:hidden p-2 rounded text-white"
           onClick={() => setOpen(!open)}
         >
           {open ? <X size={22} /> : <Menu size={22} />}
@@ -207,7 +210,7 @@ function TopNav({ page, setPage, onSignOut, userName, showTeam }) {
 
       {/* Mobile Drawer */}
       {open && (
-        <div style={{ background: C.navyDeep, borderBottom: `1px solid ${C.lineDark}` }} className="md:hidden px-4 pt-2 pb-4 space-y-1">
+        <div style={{ background: C.navyDeep, borderBottom: `1px solid ${C.lineDark}` }} className="lg:hidden px-4 pt-2 pb-4 space-y-1">
           {items.map((it) => {
             const active = page === it.id || (it.id === "work" && page === "completed");
             return (
@@ -2035,6 +2038,202 @@ function Team({ viewer, access }) {
   );
 }
 
+
+/* ---------------------------------------------------------------
+   ACTIVITY LOG (admin only: who changed what, and when)
+------------------------------------------------------------------*/
+const ACTOR_COLORS = { person: C.navy, admin: C.orangeDeep, office: C.steel, public: C.blue, unknown: C.orangeDeep, open: C.steel };
+
+// One line of the log. Opens to show the before and after of each field and
+// where the request came from.
+function ActivityEntry({ entry, employees }) {
+  const [open, setOpen] = useState(false);
+  const rows = open ? changeRows(entry, employees) : [];
+  return (
+    <li data-testid="activity-entry" style={{ borderColor: C.line }} className="border-t first:border-t-0">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        className="w-full text-left px-4 py-3 flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-4 hover:bg-black/[0.02]"
+      >
+        <div className="flex items-center gap-3 sm:w-64 shrink-0">
+          <span style={{ color: C.steel }} className="f-mono text-xs w-16 shrink-0">{timeLabel(entry.at)}</span>
+          <span
+            data-testid="activity-actor"
+            style={{ color: ACTOR_COLORS[entry.actorType] ?? C.steel, borderColor: C.line, background: C.paper }}
+            className="f-body text-xs font-semibold px-2 py-0.5 rounded border truncate"
+          >
+            {entry.actorName}
+          </span>
+        </div>
+        <span data-testid="activity-summary" style={{ color: C.ink }} className="f-body text-sm flex-1 leading-snug">{entry.summary}</span>
+        <span className="flex items-center gap-2 shrink-0">
+          <span style={{ color: C.steel }} className="f-mono text-[10px] uppercase tracking-wider">{kindLabel(entry.action)}</span>
+          <ChevronDown size={15} style={{ color: C.steel }} className={open ? "rotate-180 transition-transform" : "transition-transform"} />
+        </span>
+      </button>
+      {open && (
+        <div data-testid="activity-detail" style={{ background: C.paper, borderColor: C.line }} className="border-t px-4 py-3">
+          {rows.length > 0 && (
+            <div className="overflow-x-auto mb-3">
+              <table className="f-body text-xs w-full">
+                <thead>
+                  <tr style={{ color: C.steel }} className="text-left">
+                    <th className="font-semibold py-1 pr-4 w-40">What</th>
+                    <th className="font-semibold py-1 pr-4">Before</th>
+                    <th className="font-semibold py-1">After</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((row) => (
+                    <tr key={row.field} style={{ borderColor: C.line, color: C.ink }} className="border-t align-top">
+                      <td style={{ color: C.steel }} className="py-1.5 pr-4 whitespace-nowrap">{row.label}</td>
+                      <td className="py-1.5 pr-4 break-words">{row.from}</td>
+                      <td className="py-1.5 font-medium break-words">{row.to}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          <div style={{ color: C.steel }} className="f-mono text-[11px] leading-relaxed">
+            Entry #{entry.id} · {dayLabel(dayOf(entry.at))}, {timeLabel(entry.at)} · {deviceLabel(entry.userAgent)}{entry.ip ? ` · from ${entry.ip}` : ""}
+          </div>
+        </div>
+      )}
+    </li>
+  );
+}
+
+// Shown in place of the log to anyone who is not the admin, and in the
+// preview without a server, where nothing is recorded.
+function ActivityUnavailable({ access }) {
+  return (
+    <div style={{ background: C.paper }} className="w-full min-h-[calc(100vh-4rem)]">
+      <div className="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8 py-8 sm:py-12">
+        <h1 style={{ color: C.ink }} className="f-display text-2xl sm:text-3xl font-bold mb-6">Activity log</h1>
+        {hasApi() ? (
+          <AccessNote testId="activity-access" icon={Lock} title="Only the admin can see the activity log" actionLabel="Switch sign-in" onAction={access?.onSwitchSignIn}>
+            <div>It records every change made on this site, who made it and when.</div>
+          </AccessNote>
+        ) : (
+          <AccessNote testId="activity-access" title="Nothing is recorded in this preview">
+            <div>The activity log is kept by the server. This copy of the site runs on sample data without one.</div>
+          </AccessNote>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function Activity() {
+  const [filters, setFilters] = useState({ actor: "", kind: "" });
+  const [entries, setEntries] = useState([]);
+  const [nextBefore, setNextBefore] = useState(null);
+  const [employees, setEmployees] = useState([]);
+  const [load, setLoad] = useState({ state: "loading" });
+  const [attempt, setAttempt] = useState(0);
+  const [more, setMore] = useState({ busy: false, error: null });
+
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all([fetchActivity(filters), fetchEmployees()])
+      .then(([page, people]) => {
+        if (cancelled) return;
+        setEntries(page.entries);
+        setNextBefore(page.nextBefore);
+        setEmployees(people);
+        setLoad({ state: "ready" });
+      })
+      .catch((err) => { if (!cancelled) setLoad({ state: "error", message: err.message }); });
+    return () => { cancelled = true; };
+  }, [filters, attempt]);
+
+  const reload = () => { setLoad({ state: "loading" }); setMore({ busy: false, error: null }); setAttempt((a) => a + 1); };
+  const choose = (change) => { setLoad({ state: "loading" }); setMore({ busy: false, error: null }); setFilters((f) => ({ ...f, ...change })); };
+  const loadOlder = async () => {
+    setMore({ busy: true, error: null });
+    try {
+      const page = await fetchActivity({ ...filters, before: nextBefore });
+      setEntries((prev) => [...prev, ...page.entries]);
+      setNextBefore(page.nextBefore);
+      setMore({ busy: false, error: null });
+    } catch (err) {
+      setMore({ busy: false, error: err.message });
+    }
+  };
+
+  const today = localDay();
+  const groups = groupByDay(entries);
+  const selectStyle = { borderColor: C.line, color: C.ink };
+
+  return (
+    <div style={{ background: C.paper }} className="w-full min-h-[calc(100vh-4rem)]">
+      <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8 sm:py-12">
+        <div style={{ color: C.orangeDeep }} className="f-mono text-xs font-semibold tracking-wider uppercase mb-1">Admin</div>
+        <h1 style={{ color: C.ink }} className="f-display text-2xl sm:text-3xl font-bold flex items-center gap-2"><ScrollText size={24} /> Activity log</h1>
+        <p style={{ color: C.steel }} className="f-body text-sm mt-1 mb-6 max-w-2xl">
+          Every change made on this site, who made it and when. Entries are written by the server as the change is saved and cannot be edited or deleted, by anyone.
+        </p>
+
+        <div className="flex flex-col sm:flex-row sm:items-end gap-3 mb-6">
+          <label className="f-body text-xs font-semibold flex-1 sm:max-w-xs" style={{ color: C.steel }}>
+            Who
+            <select aria-label="Who" value={filters.actor} onChange={(e) => choose({ actor: e.target.value })} style={selectStyle} className={`${INPUT_CLASS} mt-1`}>
+              {actorFilters(employees).map((f) => <option key={f.id} value={f.id}>{f.label}</option>)}
+            </select>
+          </label>
+          <label className="f-body text-xs font-semibold flex-1 sm:max-w-xs" style={{ color: C.steel }}>
+            What
+            <select aria-label="What" value={filters.kind} onChange={(e) => choose({ kind: e.target.value })} style={selectStyle} className={`${INPUT_CLASS} mt-1`}>
+              {KIND_FILTERS.map((f) => <option key={f.id} value={f.id}>{f.label}</option>)}
+            </select>
+          </label>
+          <button onClick={reload} style={{ borderColor: C.line, color: C.ink, background: C.card }} className="f-body text-xs font-semibold px-4 py-2.5 rounded border shadow-sm flex items-center justify-center gap-2 hover:opacity-80">
+            <RefreshCw size={13} /> Refresh
+          </button>
+        </div>
+
+        {load.state === "loading" && <div style={{ borderColor: C.line, color: C.steel, background: C.card }} className="border rounded-md p-10 text-center f-body text-sm">Loading activity…</div>}
+        {load.state === "error" && (
+          <div style={{ borderColor: C.orangeDeep, background: "#FDF0EA" }} className="border rounded-md p-6 text-center">
+            <p style={{ color: C.orangeDeep }} className="f-body text-sm mb-3">Could not load the activity log. {load.message}</p>
+            <button onClick={reload} style={{ background: C.navy, color: C.paper }} className="f-body text-xs font-semibold px-4 py-2 rounded shadow-sm hover:opacity-90">Retry</button>
+          </div>
+        )}
+        {load.state === "ready" && entries.length === 0 && (
+          <div data-testid="activity-empty" style={{ borderColor: C.line, color: C.steel, background: C.card }} className="border border-dashed rounded-md p-10 text-center f-body text-sm">
+            {filters.actor || filters.kind ? "Nothing recorded for this choice." : "Nothing recorded yet. Changes appear here from now on."}
+          </div>
+        )}
+        {load.state === "ready" && groups.map((group) => (
+          <section key={group.day} className="mb-6">
+            <h2 style={{ color: C.steel }} className="f-mono text-xs font-semibold tracking-wider uppercase mb-2 px-1">
+              {group.day === today ? "Today · " : ""}{dayLabel(group.day)}
+            </h2>
+            <ul style={{ borderColor: C.line, background: C.card }} className="border rounded-md shadow-sm overflow-hidden">
+              {group.entries.map((entry) => <ActivityEntry key={entry.id} entry={entry} employees={employees} />)}
+            </ul>
+          </section>
+        ))}
+        {load.state === "ready" && entries.length > 0 && (
+          <div className="text-center">
+            {more.error && <p role="alert" style={{ color: C.orangeDeep }} className="f-body text-sm mb-3">Could not load older entries. {more.error}</p>}
+            {nextBefore !== null ? (
+              <button data-testid="activity-older" onClick={loadOlder} disabled={more.busy} style={{ background: C.navy, color: C.paper }} className="f-body text-xs font-semibold px-5 py-2.5 rounded shadow-sm hover:opacity-90 disabled:opacity-60">
+                {more.busy ? "Loading…" : "Show older entries"}
+              </button>
+            ) : (
+              <p data-testid="activity-end" style={{ color: C.steel }} className="f-body text-xs">That is everything recorded{filters.actor || filters.kind ? " for this choice" : ""}.</p>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 /* ---------------------------------------------------------------
    STAFF SIGN-IN
 ------------------------------------------------------------------*/
@@ -2238,6 +2437,7 @@ export default function App() {
         onSignOut={signedIn ? staff.signOut : null}
         userName={signedIn ? viewerLabel(staff.session) : null}
         showTeam={hasApi() && (signedIn || staff.session.state === "open")}
+        showActivity={hasApi() && staff.isAdmin && (signedIn || staff.session.state === "open")}
       />
       <main>
         {page === "home" && <Landing setPage={setPage} onEnquiry={hasApi() ? sendEnquiry : sendLocalEnquiry} />}
@@ -2254,6 +2454,11 @@ export default function App() {
         )}
         {page === "payments" && <StaffOnly staff={staff}><Payments key={staff.session.role} isAdmin={staff.isAdmin} /></StaffOnly>}
         {page === "team" && <StaffOnly staff={staff}><Team key={`${staff.session.role}-${staff.session.employeeId}`} viewer={staff.viewer} access={access} /></StaffOnly>}
+        {page === "activity" && (
+          <StaffOnly staff={staff}>
+            {hasApi() && staff.isAdmin ? <Activity key={staff.session.role} /> : <ActivityUnavailable access={access} />}
+          </StaffOnly>
+        )}
         {page === "enquiries" && <StaffOnly staff={staff}><Enquiries local={localEnquiries} setLocal={setLocalEnquiries} /></StaffOnly>}
       </main>
     </div>
