@@ -289,3 +289,91 @@ test("PATCH /api/clients/:id returns 404 for an unknown client", async () => {
   const res = await patch("/api/clients/c999", {});
   assert.equal(res.status, 404);
 });
+
+const validClient = {
+  name: "Test Client",
+  contact: "Tester",
+  phone: "+91 99999 00000",
+  due: 12000,
+  invoiceDate: "2026-03-05",
+  status: "due-soon",
+};
+const clientCount = () => prisma.client.count();
+
+// POSTs a client and always deletes it afterwards, even if assertions fail.
+async function withCreatedClient(body, fn) {
+  const res = await post("/api/clients", body);
+  const payload = await res.json();
+  try {
+    await fn(res, payload);
+  } finally {
+    if (res.status === 201) await prisma.client.deleteMany({ where: { id: payload.id } });
+  }
+}
+
+test("POST /api/clients creates a client with the next c# id and defaults", async () => {
+  const rows = await prisma.client.findMany({ select: { id: true } });
+  const max = Math.max(0, ...rows.map((r) => Number(/^c(\d+)$/.exec(r.id)?.[1] ?? 0)));
+  const n = await clientCount();
+  const t0 = Date.now();
+
+  await withCreatedClient(validClient, async (res, created) => {
+    assert.equal(res.status, 201);
+    assert.equal(created.id, `c${max + 1}`);
+    assert.equal(created.name, "Test Client");
+    assert.equal(created.due, 12000);
+    assert.equal(created.status, "due-soon");
+    assert.equal(created.notes, null);
+    assert.equal(created.invoiceDate, "2026-03-05T00:00:00.000Z");
+    assert.ok(Date.parse(created.lastCall) >= t0 - 1000 && Date.now() - Date.parse(created.lastCall) < 60_000);
+    assert.equal(await clientCount(), n + 1);
+  });
+  assert.equal(await clientCount(), n);
+});
+
+test("POST /api/clients accepts notes, due of 0 and ISO timestamps", async () => {
+  const body = { ...validClient, due: 0, notes: "Pay by Friday", invoiceDate: "2026-03-05T10:30:00Z", lastCall: "2026-03-07" };
+  await withCreatedClient(body, async (res, created) => {
+    assert.equal(res.status, 201);
+    assert.equal(created.due, 0);
+    assert.equal(created.notes, "Pay by Friday");
+    assert.equal(created.invoiceDate, "2026-03-05T10:30:00.000Z");
+    assert.equal(created.lastCall, "2026-03-07T00:00:00.000Z");
+  });
+});
+
+test("POST /api/clients returns 400 for a missing required field", async () => {
+  const n = await clientCount();
+  for (const field of Object.keys(validClient)) {
+    const body = { ...validClient };
+    delete body[field];
+    await withCreatedClient(body, async (res, payload) => {
+      assert.equal(res.status, 400, `missing ${field}`);
+      assert.match(payload.error, new RegExp(field));
+    });
+  }
+  assert.equal(await clientCount(), n);
+});
+
+test("POST /api/clients returns 400 for invalid values", async () => {
+  const n = await clientCount();
+  const bad = [
+    { status: "late" },
+    { due: -1 },
+    { due: 10.5 },
+    { due: "100" },
+    { invoiceDate: "not a date" },
+    { invoiceDate: "2026-02-30" },
+    { invoiceDate: "05/03/2026" },
+    { lastCall: "yesterday" },
+    { name: "   " },
+    { notes: 5 },
+  ];
+  for (const override of bad) {
+    await withCreatedClient({ ...validClient, ...override }, async (res, payload) => {
+      assert.equal(res.status, 400, JSON.stringify(override));
+      assert.equal(typeof payload.error, "string");
+    });
+  }
+  assert.equal(await clientCount(), n);
+});
