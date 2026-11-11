@@ -35,6 +35,7 @@ WITH clock AS (
          count(*) FILTER (WHERE due > 0 AND (("lastCall" AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Kolkata')::date <= w.today - 7) AS balance_clients_stamp_age_7d,
          count(*) FILTER (WHERE "lastCall" > w.observed_at AT TIME ZONE 'UTC') AS future_last_call_records,
          count(*) FILTER (WHERE status = 'paid' AND due > 0) AS paid_positive_balance_records,
+         count(*) FILTER (WHERE due < 0) AS negative_balance_records,
          count(*) FILTER (WHERE status NOT IN ('paid', 'due-soon', 'overdue')) AS invalid_client_status_records
   FROM "Client" CROSS JOIN windows w
 )

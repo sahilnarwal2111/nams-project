@@ -35,7 +35,7 @@ const expectedKeys = [
   'employees_with_open_tasks', 'client_records', 'balance_client_records',
   'recorded_balance_inr', 'overdue_balance_client_records', 'overdue_recorded_balance_inr',
   'balance_clients_latest_stamp_previous_day', 'balance_clients_stamp_age_7d',
-  'future_last_call_records', 'paid_positive_balance_records', 'invalid_client_status_records',
+  'future_last_call_records', 'paid_positive_balance_records', 'negative_balance_records', 'invalid_client_status_records',
   'overdue_dated_open_fraction', 'roster_with_open_tasks_fraction', 'overdue_balance_fraction',
   'latest_stamp_previous_day_fraction',
 ];
@@ -138,17 +138,32 @@ test('stamp age is local calendar days; future stamps and overwritten history ar
   });
 });
 
+test('negative balances from direct writes raise a publication quality flag', async () => {
+  await fixture(async (tx) => {
+    await tx.$executeRaw`
+      INSERT INTO "Client" (id, name, contact, phone, due, "invoiceDate", "lastCall", status) VALUES
+      ('1', 'PRIVATE', 'PRIVATE', 'PRIVATE', -50, '2026-01-01', '2026-11-10', 'paid'),
+      ('2', 'PRIVATE', 'PRIVATE', 'PRIVATE', 100, '2026-01-01', '2026-11-10', 'overdue')`;
+    const row = await report(tx);
+    assert.equal(row.negative_balance_records, 1n);
+    assert.equal(row.balance_client_records, 1n);
+    assert.equal(Number(row.recorded_balance_inr), 50);
+    // The uncorrected source total stays visible; the quality flag blocks publication.
+    assert.equal(Number(row.overdue_balance_fraction), 2);
+  });
+});
+
 test('production SELECT executes in a read-only transaction with bounded wrapper settings', async () => {
   assert.match(wrapper, /BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;/);
   assert.match(wrapper, /SET LOCAL statement_timeout = '5s';/);
   assert.match(wrapper, /SET LOCAL lock_timeout = '1s';/);
-  assert.match(wrapper, /SET LOCAL search_path = public, pg_catalog;/);
+  assert.match(wrapper, /SET LOCAL search_path = pg_catalog, public;/);
   assert.match(wrapper, /\\ir operational-metrics.sql/);
   await prisma.$transaction(async (tx) => {
     await tx.$executeRawUnsafe('SET TRANSACTION READ ONLY');
     await tx.$executeRawUnsafe("SET LOCAL statement_timeout = '5s'");
     await tx.$executeRawUnsafe("SET LOCAL lock_timeout = '1s'");
-    await tx.$executeRawUnsafe('SET LOCAL search_path = public, pg_catalog');
+    await tx.$executeRawUnsafe('SET LOCAL search_path = pg_catalog, public');
     const [settings] = await tx.$queryRawUnsafe('SHOW transaction_read_only');
     assert.equal(settings.transaction_read_only, 'on');
     await report(tx, sql);

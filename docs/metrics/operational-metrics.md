@@ -38,7 +38,8 @@ Employee assignment uses the real `Task.assigneeId` relation, without employee-l
 - **Stamp age:** local calendar-day difference at observation time. Seven days is a proposed follow-up threshold, not an SLA.
 
 Counts and amounts have no denominator. Fractions use the explicit denominator below.
-Fractions range from 0 to 1, not 0 to 100. A zero denominator returns SQL `NULL`, never zero percent.
+With valid source balances, fractions range from 0 to 1, not 0 to 100.
+A zero denominator returns SQL `NULL`, never zero percent.
 Empty cohorts produce zero counts and zero amounts. Report the numerator and denominator beside each fraction.
 Flag small denominators as **small sample**; proposed threshold: fewer than 10 records.
 Do not interpret a small-sample change as a trend.
@@ -73,6 +74,7 @@ Do not interpret a small-sample change as a trend.
 - `invalid_task_status_records`: statuses outside `todo`, `inprogress`, `done`; excluded from open-task metrics, included in `task_records`.
 - `invalid_client_status_records`: statuses outside `paid`, `due-soon`, `overdue`; balances still enter the total.
 - `paid_positive_balance_records`: status `paid` with `due > 0`; balances still enter the total and balance cohort.
+- `negative_balance_records`: `due < 0`, possible through direct database writes; totals retain these values, so fractions can be invalid.
 - `future_last_call_records`: `lastCall` later than observation time, across all clients.
 
 Stop publication when these quality counts are nonzero until the owner checks the source.
@@ -109,7 +111,7 @@ psql -X "$REPORTING_DATABASE_URL" --set=ON_ERROR_STOP=1 \
 ```
 
 The wrapper enforces read-only, repeatable-read execution, a five-second statement limit, and a one-second lock limit.
-It pins the source search path to `public, pg_catalog` and disables psql startup files through `-X`.
+It pins the source search path to `pg_catalog, public` and disables psql startup files through `-X`.
 Use one connection and no concurrent reporting runs. The query returns one aggregate row.
 The wrapper makes no persistent writes and creates no objects. A timeout is a failed report, not a zero value.
 
