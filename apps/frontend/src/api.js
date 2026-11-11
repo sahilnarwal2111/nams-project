@@ -101,6 +101,65 @@ export function clientsFromApi(list) {
   return list.map(clientFromApi);
 }
 
+// Whole rupees from a form field: "1,84,000" -> 184000. NaN when it is not a
+// whole number of zero or more.
+export function parseRupees(value) {
+  const text = String(value ?? "").replace(/[,\s₹]/g, "");
+  return /^\d+$/.test(text) ? Number(text) : NaN;
+}
+
+// Returns a message when the client form cannot be saved, otherwise null.
+export function clientFormError(form) {
+  if (["name", "contact", "phone"].some((k) => String(form[k] ?? "").trim() === "")) {
+    return "Client name, contact person and phone are required.";
+  }
+  const due = parseRupees(form.due);
+  if (Number.isNaN(due)) return "Outstanding amount must be a whole number of rupees, zero or more.";
+  if (!form.invoiceDate) return "Invoice date is required.";
+  if (due > 0 && form.status === "paid") return "A client with an outstanding amount cannot be marked as paid.";
+  return null;
+}
+
+// The client form's values -> body for POST /api/clients and PATCH /api/clients/:id.
+// A client who owes nothing is always "paid".
+export function clientToApi(form) {
+  const due = parseRupees(form.due);
+  return {
+    name: form.name.trim(),
+    contact: form.contact.trim(),
+    phone: form.phone.trim(),
+    due,
+    invoiceDate: form.invoiceDate,
+    status: due === 0 ? "paid" : form.status,
+    notes: blankToNull(form.notes),
+  };
+}
+
+// Returns a message when a received amount cannot be recorded, otherwise null.
+export function paymentError(client, amount) {
+  const paid = parseRupees(amount);
+  if (Number.isNaN(paid) || paid === 0) return "Enter the amount received as a whole number of rupees.";
+  if (paid > client.due) return "The amount received is more than the outstanding amount.";
+  return null;
+}
+
+// Body for PATCH /api/clients/:id when a payment is received: the amount comes
+// off the dues, and a client who has cleared everything becomes "paid".
+export function paymentPatchBody(client, amount) {
+  const due = client.due - parseRupees(amount);
+  return due === 0 ? { due, status: "paid" } : { due };
+}
+
+// Next c# id for a client created in mock mode: highest number + 1.
+export function nextLocalClientId(clients) {
+  let max = 0;
+  for (const { id } of clients) {
+    const m = /^c(\d+)$/.exec(id);
+    if (m) max = Math.max(max, Number(m[1]));
+  }
+  return `c${max + 1}`;
+}
+
 // Body for PATCH /api/clients/:id when logging a reminder: empty, so the API sets lastCall to now.
 export function logCallPatchBody() {
   return {};
@@ -178,4 +237,27 @@ export async function updateTask(id, form) {
 
 export async function deleteTask(id) {
   await request(`/api/tasks/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export async function createClient(form) {
+  return clientFromApi(await request("/api/clients", { method: "POST", body: JSON.stringify(clientToApi(form)) }));
+}
+
+export async function updateClient(id, form) {
+  return clientFromApi(
+    await request(`/api/clients/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(clientToApi(form)) })
+  );
+}
+
+export async function recordPayment(client, amount) {
+  return clientFromApi(
+    await request(`/api/clients/${encodeURIComponent(client.id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(paymentPatchBody(client, amount)),
+    })
+  );
+}
+
+export async function deleteClient(id) {
+  await request(`/api/clients/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
