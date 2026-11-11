@@ -106,6 +106,70 @@ test("PATCH /api/tasks/:id returns 404 for an unknown task", async () => {
   assert.equal(res.status, 404);
 });
 
+test("PATCH /api/tasks/:id edits several fields at once and leaves the rest alone", async () => {
+  const original = await (await get("/api/tasks/NK-102")).json();
+  const other = original.assigneeId === "e1" ? "e2" : "e1";
+  try {
+    const res = await patch("/api/tasks/NK-102", {
+      title: "  Edited title ",
+      client: "Edited client",
+      assigneeId: other,
+      priority: original.priority === "low" ? "high" : "low",
+      id: "NK-999",
+      updatedAt: "2000-01-01T00:00:00.000Z",
+    });
+    assert.equal(res.status, 200);
+    const task = await res.json();
+    assert.equal(task.id, "NK-102");
+    assert.equal(task.title, "Edited title");
+    assert.equal(task.client, "Edited client");
+    assert.equal(task.assigneeId, other);
+    assert.notEqual(task.priority, original.priority);
+    assert.equal(task.status, original.status);
+    assert.notEqual(new Date(task.updatedAt).getFullYear(), 2000);
+  } finally {
+    await prisma.task.update({
+      where: { id: "NK-102" },
+      data: {
+        title: original.title,
+        client: original.client,
+        assigneeId: original.assigneeId,
+        priority: original.priority,
+        status: original.status,
+      },
+    });
+  }
+});
+
+test("PATCH /api/tasks/:id rejects bad bodies without changing the task", async () => {
+  const before = await (await get("/api/tasks/NK-102")).json();
+  const bad = [
+    {},
+    { id: "NK-500", updatedAt: "2000-01-01T00:00:00.000Z" },
+    { title: "" },
+    { title: "   " },
+    { client: "" },
+    { title: 5 },
+    { priority: "urgent" },
+    { status: "blocked" },
+    { assigneeId: "e999" },
+    { assigneeId: "" },
+    { title: "Should not stick", priority: "urgent" },
+  ];
+  for (const body of bad) {
+    const res = await patch("/api/tasks/NK-102", body);
+    assert.equal(res.status, 400, `expected 400 for ${JSON.stringify(body)}`);
+    assert.ok((await res.json()).error);
+  }
+  const after = await (await get("/api/tasks/NK-102")).json();
+  assert.deepEqual(after, before);
+});
+
+test("PATCH /api/tasks/:id returns 404 for an unknown task with a valid multi-field body", async () => {
+  const res = await patch("/api/tasks/NK-999", { title: "x", priority: "low" });
+  assert.equal(res.status, 404);
+});
+
 const validTask = { title: "Test task", client: "Test client", assigneeId: "e1", priority: "high" };
 const taskCount = async () => (await (await get("/api/tasks")).json()).length;
 
