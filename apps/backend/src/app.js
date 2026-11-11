@@ -5,6 +5,7 @@ import { tasksRouter } from "./routes/tasks.routes.js";
 import { clientsRouter } from "./routes/clients.routes.js";
 import { authRouter } from "./routes/auth.routes.js";
 import { enquiriesRouter } from "./routes/enquiries.routes.js";
+import { teamRouter } from "./routes/team.routes.js";
 import { requireAuth } from "./lib/auth.js";
 
 export const app = express();
@@ -30,6 +31,8 @@ app.use(express.json());
 
 app.get("/api/health", (req, res) => res.json({ status: "ok" }));
 app.use("/api/auth", authRouter);
+// Public: names and roles for the landing page.
+app.use("/api/team", teamRouter);
 
 // Open while APP_PASSWORD is unset; otherwise these need a signed-in token.
 app.use("/api/employees", requireAuth, employeesRouter);

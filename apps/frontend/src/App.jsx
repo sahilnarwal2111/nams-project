@@ -6,9 +6,10 @@ import {
   clientToApi, clientFormError, paymentError, paymentPatchBody, parseRupees, nextLocalClientId,
   fetchSession, login, logout, onAuthLost,
   daysAgo, paymentPending, enquiryError,
-  canEditTask, signInChoices, defaultSignInChoice, personalPasswordError, setEmployeePassword, clearEmployeePassword, sendEnquiry, fetchEnquiries, updateEnquiryStatus, deleteEnquiry,
+  fetchTeam, canEditTask, signInChoices, defaultSignInChoice, personalPasswordError, setEmployeePassword, clearEmployeePassword, sendEnquiry, fetchEnquiries, updateEnquiryStatus, deleteEnquiry,
 } from "./api.js";
 import { filterTasks, sortTasks, isOverdue, SORT_MODES } from "./board.js";
+import { pageFromHash, hashForPage, anchorFromHash } from "./route.js";
 import {
   Ruler, Route, Building2, Droplets, Plane, Waves,
   Menu, X, ChevronRight, Clock, PhoneCall,
@@ -309,7 +310,24 @@ function EnquiryForm({ onSend }) {
   );
 }
 
+// The team shown on the landing page: the mock list, or the database's in API
+// mode. Nothing is shown until the API answers, so visitors never see old names.
+function useTeam() {
+  const useApi = hasApi();
+  const [team, setTeam] = useState(useApi ? null : EMPLOYEES);
+  useEffect(() => {
+    if (!useApi) return undefined;
+    let cancelled = false;
+    fetchTeam()
+      .then((list) => { if (!cancelled) setTeam(list); })
+      .catch(() => { if (!cancelled) setTeam([]); });
+    return () => { cancelled = true; };
+  }, [useApi]);
+  return team;
+}
+
 function Landing({ setPage, onEnquiry }) {
+  const team = useTeam();
   return (
     <div className="w-full">
       {/* HERO */}
@@ -383,7 +401,10 @@ function Landing({ setPage, onEnquiry }) {
             <h2 style={{ color: C.paper }} className="f-display text-2xl sm:text-3xl font-bold">Multidisciplinary Practice Leaders</h2>
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            {EMPLOYEES.map((e) => (
+            {team === null && [0, 1, 2, 3].map((i) => (
+              <div key={i} data-testid="team-placeholder" style={{ background: "rgba(255,255,255,0.04)", borderColor: C.lineDark }} className="border rounded-md p-5 h-[92px] sm:h-[134px] animate-pulse" />
+            ))}
+            {team?.map((e) => (
               <div key={e.id} style={{ background: "rgba(255,255,255,0.04)", borderColor: C.lineDark }} className="border rounded-md p-5 flex sm:flex-col items-center sm:items-start gap-4 sm:gap-0">
                 <div style={{ background: C.orange, color: "#FFFFFF" }} className="w-11 h-11 rounded-full flex items-center justify-center f-mono text-sm font-bold shrink-0 sm:mb-4">
                   {e.initials}
@@ -1962,7 +1983,34 @@ function StaffOnly({ staff, children }) {
    MAIN APP EXPORT
 ------------------------------------------------------------------*/
 export default function App() {
-  const [page, setPage] = useState("home");
+  // The page comes from the address, so back, forward and shared links work.
+  const [page, setPageState] = useState(() => pageFromHash(window.location.hash));
+  useEffect(() => {
+    const onHashChange = () => {
+      const next = pageFromHash(window.location.hash);
+      setPageState(next);
+      // A page starts at the top; a section link scrolls to its section once
+      // the landing page has drawn.
+      const anchor = anchorFromHash(window.location.hash);
+      if (anchor) requestAnimationFrame(() => document.getElementById(anchor)?.scrollIntoView());
+      else window.scrollTo(0, 0);
+    };
+    window.addEventListener("hashchange", onHashChange);
+    return () => window.removeEventListener("hashchange", onHashChange);
+  }, []);
+  // Opening the site at a section link such as #enquiry: scroll there once
+  // the landing page has drawn.
+  useEffect(() => {
+    const anchor = anchorFromHash(window.location.hash);
+    if (anchor) document.getElementById(anchor)?.scrollIntoView();
+  }, []);
+  const setPage = (next) => {
+    if (pageFromHash(window.location.hash) === next && !anchorFromHash(window.location.hash)) {
+      window.scrollTo(0, 0);
+      return;
+    }
+    window.location.hash = hashForPage(next);
+  };
   const staff = useStaffSession();
   // Mock mode only: enquiries live here so the landing page form and the
   // Enquiries page share one list.
