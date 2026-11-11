@@ -3,6 +3,7 @@
 // (calendar dates by UTC day, moments in time by the viewer's local day).
 // Convert at this boundary only.
 import { activityQuery } from "./activity.js";
+import { parseFee } from "./receivables.js";
 
 // Empty/unset means "no API": callers fall back to mock data.
 export const API_URL = (import.meta.env?.VITE_API_URL ?? "").trim().replace(/\/+$/, "");
@@ -19,15 +20,20 @@ export function taskFromApi(t) {
   // A moment in time, shown as the viewer's local day. createdAt stays a full
   // timestamp because it is only used for ordering.
   if ("completedAt" in task) task.completedAt = instantFromApi(task.completedAt);
+  // The last payment reminder call, as the viewer's local day.
+  if ("lastReminder" in task) task.lastReminder = instantFromApi(task.lastReminder);
+  // fee, received (admin only) and paymentStatus pass through as they are.
   return task;
 }
 
 const blankToNull = (v) => (typeof v === "string" && v.trim() !== "" ? v.trim() : null);
 
 // The work form's values -> body for POST /api/tasks and PATCH /api/tasks/:id.
-// Blank optional fields are sent as null, which clears them.
+// Blank optional fields are sent as null, which clears them. The amount to
+// charge is sent only when the form has the field, which is the admin's form.
 export function taskToApi(form) {
   return {
+    ...(form.fee === undefined ? {} : { fee: parseFee(form.fee).fee ?? null }),
     title: (form.title ?? "").trim(),
     client: (form.client ?? "").trim(),
     assigneeId: form.assignee,
@@ -100,14 +106,6 @@ export function instantFromApi(value) {
   return Number.isNaN(d.getTime()) ? value : localDay(d);
 }
 
-export function clientFromApi(c) {
-  return { ...c, invoiceDate: dateFromApi(c.invoiceDate), lastCall: instantFromApi(c.lastCall) };
-}
-
-export function clientsFromApi(list) {
-  return list.map(clientFromApi);
-}
-
 // Whole rupees from a form field: "1,84,000" -> 184000. NaN when it is not a
 // whole number of zero or more.
 export function parseRupees(value) {
@@ -115,50 +113,7 @@ export function parseRupees(value) {
   return /^\d+$/.test(text) ? Number(text) : NaN;
 }
 
-// Returns a message when the client form cannot be saved, otherwise null.
-export function clientFormError(form) {
-  if (["name", "contact", "phone"].some((k) => String(form[k] ?? "").trim() === "")) {
-    return "Client name, contact person and phone are required.";
-  }
-  const due = parseRupees(form.due);
-  if (Number.isNaN(due)) return "Outstanding amount must be a whole number of rupees, zero or more.";
-  if (!form.invoiceDate) return "Invoice date is required.";
-  if (due > 0 && form.status === "paid") return "A client with an outstanding amount cannot be marked as paid.";
-  return null;
-}
-
-// The client form's values -> body for POST /api/clients and PATCH /api/clients/:id.
-// A client who owes nothing is always "paid".
-export function clientToApi(form) {
-  const due = parseRupees(form.due);
-  return {
-    name: form.name.trim(),
-    contact: form.contact.trim(),
-    phone: form.phone.trim(),
-    due,
-    invoiceDate: form.invoiceDate,
-    status: due === 0 ? "paid" : form.status,
-    notes: blankToNull(form.notes),
-  };
-}
-
-// Returns a message when a received amount cannot be recorded, otherwise null.
-export function paymentError(client, amount) {
-  const paid = parseRupees(amount);
-  if (Number.isNaN(paid) || paid === 0) return "Enter the amount received as a whole number of rupees.";
-  if (paid > client.due) return "The amount received is more than the outstanding amount.";
-  return null;
-}
-
-// What a received payment changes on the client: the amount comes off the
-// dues, and a client who has cleared everything becomes "paid". The server
-// applies the same rule; this copy is for mock mode.
-export function paymentPatchBody(client, amount) {
-  const due = client.due - parseRupees(amount);
-  return due === 0 ? { due, status: "paid" } : { due };
-}
-
-// Body for POST /api/clients/:id/payments.
+// Body for POST /api/tasks/:id/payments.
 export function paymentToApi(amount, note) {
   return { amount: parseRupees(amount), note: blankToNull(note) };
 }
@@ -168,20 +123,6 @@ export function paymentFromApi(p) {
   return { ...p, receivedAt: instantFromApi(p.receivedAt) };
 }
 
-// Next c# id for a client created in mock mode: highest number + 1.
-export function nextLocalClientId(clients) {
-  let max = 0;
-  for (const { id } of clients) {
-    const m = /^c(\d+)$/.exec(id);
-    if (m) max = Math.max(max, Number(m[1]));
-  }
-  return `c${max + 1}`;
-}
-
-// Body for PATCH /api/clients/:id when logging a reminder: empty, so the API sets lastCall to now.
-export function logCallPatchBody() {
-  return {};
-}
 
 // Body for PATCH /api/tasks/:id when moving a card.
 export function statusPatchBody(status) {
@@ -323,12 +264,6 @@ export function personalPasswordError(password) {
   return null;
 }
 
-// Whether a client still owes money. Staff are not sent the amount, so for
-// them the status decides.
-export function paymentPending(client) {
-  return typeof client.due === "number" ? client.due > 0 : client.status !== "paid";
-}
-
 export function sessionState(session) {
   if (!session.required) return "open";
   return session.authenticated ? "signedIn" : "login";
@@ -381,18 +316,6 @@ export async function fetchTasks() {
   return tasksFromApi(await request("/api/tasks"));
 }
 
-export async function fetchClients() {
-  return clientsFromApi(await request("/api/clients"));
-}
-
-export async function logClientCall(id) {
-  const updated = await request(`/api/clients/${encodeURIComponent(id)}`, {
-    method: "PATCH",
-    body: JSON.stringify(logCallPatchBody()),
-  });
-  return clientFromApi(updated);
-}
-
 export async function updateTaskStatus(id, status) {
   const updated = await request(`/api/tasks/${encodeURIComponent(id)}`, {
     method: "PATCH",
@@ -415,33 +338,37 @@ export async function deleteTask(id) {
   await request(`/api/tasks/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
 
-export async function createClient(form) {
-  return clientFromApi(await request("/api/clients", { method: "POST", body: JSON.stringify(clientToApi(form)) }));
+/* ---- receivables: amounts and payments, ticket by ticket ---------- */
+
+const taskPath = (id, rest = "") => `/api/tasks/${encodeURIComponent(id)}${rest}`;
+
+// Admin only. fee is whole rupees, or null for "not decided yet".
+export async function setTaskFee(id, fee) {
+  return taskFromApi(await request(taskPath(id), { method: "PATCH", body: JSON.stringify({ fee }) }));
 }
 
-export async function updateClient(id, form) {
-  return clientFromApi(
-    await request(`/api/clients/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(clientToApi(form)) })
-  );
+// Admin only. Stores the payment; the reply has the task with its new status.
+export async function recordPayment(id, amount, note) {
+  const result = await request(taskPath(id, "/payments"), { method: "POST", body: JSON.stringify(paymentToApi(amount, note)) });
+  return { task: taskFromApi(result.task), payment: paymentFromApi(result.payment) };
 }
 
-// Stores the payment and lowers the dues on the server in one step. Returns
-// the updated client and the stored payment.
-export async function recordPayment(client, amount, note) {
-  const result = await request(`/api/clients/${encodeURIComponent(client.id)}/payments`, {
-    method: "POST",
-    body: JSON.stringify(paymentToApi(amount, note)),
-  });
-  return { client: clientFromApi(result.client), payment: paymentFromApi(result.payment) };
+// Admin only. Newest first.
+export async function fetchPayments(id) {
+  return (await request(taskPath(id, "/payments"))).map(paymentFromApi);
 }
 
-export async function fetchPayments(clientId) {
-  return (await request(`/api/clients/${encodeURIComponent(clientId)}/payments`)).map(paymentFromApi);
+// Admin only. Takes a payment back; returns the task with its new status.
+export async function removePayment(id, paymentId) {
+  const result = await request(taskPath(id, `/payments/${encodeURIComponent(paymentId)}`), { method: "DELETE" });
+  return taskFromApi(result.task);
 }
 
-export async function deleteClient(id) {
-  await request(`/api/clients/${encodeURIComponent(id)}`, { method: "DELETE" });
+// Anyone signed in: the customer was called about payment.
+export async function logReminder(id) {
+  return taskFromApi(await request(taskPath(id, "/reminder"), { method: "POST" }));
 }
+
 
 export async function fetchSession() {
   const session = await request("/api/auth/session");

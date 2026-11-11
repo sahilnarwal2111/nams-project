@@ -2,6 +2,7 @@ import { prisma } from "../lib/prisma.js";
 import { parseDate } from "../lib/dates.js";
 import { diff, inTransaction, lockAndFind, logActivity, quoted } from "../lib/activity.js";
 import { HttpError, sendHttpError } from "../lib/httpError.js";
+import { parseFee, presentTask, presentTasks, receivedFor, taskForRole } from "../lib/billing.js";
 
 const VALID_STATUSES = ["todo", "inprogress", "done"];
 const VALID_PRIORITIES = ["low", "medium", "high"];
@@ -57,14 +58,14 @@ async function nextTaskId() {
 
 export async function listTasks(req, res) {
   const tasks = await prisma.task.findMany({ orderBy: { id: "asc" } });
-  res.json(tasks);
+  res.json(await presentTasks(prisma, tasks, req.role));
 }
 
 export async function getTask(req, res) {
   const { id } = req.params;
   const task = await prisma.task.findUnique({ where: { id } });
   if (!task) return res.status(404).json({ error: `Task ${id} not found` });
-  res.json(task);
+  res.json(await presentTask(prisma, task, req.role));
 }
 
 export async function createTask(req, res) {
@@ -87,6 +88,13 @@ export async function createTask(req, res) {
   }
   const details = parseDetails(body);
   if (details.error) return res.status(400).json({ error: details.error });
+  // The amount to charge is the admin's to set, here or later in Receivables.
+  let fee;
+  try {
+    fee = parseFee(body, req.role);
+  } catch (err) {
+    return sendHttpError(res, err);
+  }
 
   const employee = await prisma.employee.findUnique({ where: { id: assigneeId } });
   if (!employee) return res.status(400).json({ error: `assigneeId ${assigneeId} is not an existing employee` });
@@ -100,7 +108,7 @@ export async function createTask(req, res) {
       const id = await nextTaskId();
       const task = await inTransaction(async (tx) => {
         const created = await tx.task.create({
-          data: { id, title: title.trim(), client: client.trim(), status, priority, assigneeId, ...details.data, ...stamps },
+          data: { id, title: title.trim(), client: client.trim(), status, priority, assigneeId, ...details.data, ...fee, ...stamps },
         });
         await logActivity(tx, req, {
           action: "task.created",
@@ -111,7 +119,8 @@ export async function createTask(req, res) {
         });
         return created;
       });
-      return res.status(201).json(task);
+      // A new task has no payments yet.
+      return res.status(201).json(taskForRole(task, 0, req.role));
     } catch (err) {
       if (err.code !== "P2002") throw err;
     }
@@ -125,14 +134,24 @@ export async function deleteTask(req, res) {
     await inTransaction(async (tx) => {
       const before = await lockAndFind(tx, "task", id);
       if (!before) throw new HttpError(404, `Task ${id} not found`);
+      // Deleting work deletes the payments recorded against it. The whole
+      // record and those payments go into the log, so they can still be read.
+      const payments = await tx.payment.findMany({
+        where: { taskId: id },
+        orderBy: [{ receivedAt: "asc" }, { id: "asc" }],
+        select: { id: true, amount: true, receivedAt: true, note: true },
+      });
       await tx.task.delete({ where: { id } });
-      // The whole record goes into the log, so deleted work can still be read.
+      const changes = diff(before, null);
+      if (payments.length > 0) changes.payments = { from: payments, to: null };
       await logActivity(tx, req, {
         action: "task.deleted",
         entityType: "task",
         entityId: id,
-        summary: `Deleted ${id} ${quoted(before.title)}`,
-        changes: diff(before, null),
+        summary:
+          `Deleted ${id} ${quoted(before.title)}` +
+          (payments.length > 0 ? ` and ${payments.length} recorded payment${payments.length === 1 ? "" : "s"}` : ""),
+        changes,
       });
     });
     res.status(204).end();
@@ -152,6 +171,7 @@ const FIELD_LABELS = {
   workTypes: "work types",
   details: "details",
   expectedCompletion: "expected completion",
+  fee: "amount to charge",
 };
 
 // The log line for an edit: what moved, who it went to, which fields changed.
@@ -191,10 +211,15 @@ export async function updateTask(req, res) {
   const details = parseDetails(body);
   if (details.error) return res.status(400).json({ error: details.error });
   Object.assign(data, details.data);
+  try {
+    Object.assign(data, parseFee(body, req.role));
+  } catch (err) {
+    return sendHttpError(res, err);
+  }
 
   if (Object.keys(data).length === 0) {
     return res.status(400).json({
-      error: `body must include at least one of: ${[...EDITABLE_FIELDS, ...DETAIL_FIELDS].join(", ")}`,
+      error: `body must include at least one of: ${[...EDITABLE_FIELDS, ...DETAIL_FIELDS, "fee"].join(", ")}`,
     });
   }
 
@@ -240,6 +265,12 @@ export async function updateTask(req, res) {
       }
       if (!before) throw notFound();
 
+      // The amount to charge cannot drop below what has already been received.
+      const received = await receivedFor(tx, id);
+      if ("fee" in data && received > 0 && (data.fee === null || data.fee < received)) {
+        throw new HttpError(400, `fee cannot be less than the ${received} already received`);
+      }
+
       // completedAt follows the status: stamped when a task first reaches
       // "done", kept while it stays there, cleared when it is moved back.
       if ("status" in data) {
@@ -259,7 +290,30 @@ export async function updateTask(req, res) {
           changes,
         });
       }
-      return updated;
+      return taskForRole(updated, received, req.role);
+    });
+    res.json(task);
+  } catch (err) {
+    sendHttpError(res, err);
+  }
+}
+
+// Anyone signed in: notes that the customer was called about payment.
+export async function logReminder(req, res) {
+  const { id } = req.params;
+  try {
+    const task = await inTransaction(async (tx) => {
+      const before = await lockAndFind(tx, "task", id);
+      if (!before) throw new HttpError(404, `Task ${id} not found`);
+      const updated = await tx.task.update({ where: { id }, data: { lastReminder: new Date() } });
+      await logActivity(tx, req, {
+        action: "task.reminder_logged",
+        entityType: "task",
+        entityId: id,
+        summary: `Logged a payment reminder call to ${quoted(updated.client)} for ${id}`,
+        changes: diff(before, updated),
+      });
+      return presentTask(tx, updated, req.role);
     });
     res.json(task);
   } catch (err) {

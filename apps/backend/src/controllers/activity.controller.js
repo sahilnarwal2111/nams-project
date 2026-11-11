@@ -3,6 +3,7 @@ import { ACTOR_TYPES } from "../lib/activity.js";
 
 // The first part of an action: "task" in "task.moved".
 export const ACTIVITY_TYPES = ["task", "client", "payment", "enquiry", "employee", "session"];
+// "client" covers entries from before receivables moved onto tasks.
 const ENTITY_TYPES = ["task", "client", "enquiry", "employee", "session"];
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;

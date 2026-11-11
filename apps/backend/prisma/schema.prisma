@@ -51,34 +51,29 @@ model Task {
   // columns: their real dates are unknown.
   createdAt   DateTime?
   completedAt DateTime?
+
+  // Receivables. fee is the amount to charge for this work in whole rupees:
+  // null until the admin sets it, 0 for work that is not charged. Only an
+  // admin sees or changes it. lastReminder is when someone last logged a
+  // payment reminder call to the customer.
+  fee          Int?
+  lastReminder DateTime?
+  payments     Payment[]
 }
 
-model Client {
-  id          String   @id
-  name        String
-  contact     String
-  phone       String
-  due         Int
-  invoiceDate DateTime
-  lastCall    DateTime
-  // Matches PAY_STATUS_META keys: "paid" | "due-soon" | "overdue"
-  status      String
-  notes       String?
-  payments    Payment[]
-}
-
-// Money received from a client. Recording one lowers Client.due in the same
-// transaction, so the payments are the history behind the current balance.
+// Money received for a piece of work. A ticket's payment status is never
+// stored: it is worked out from Task.fee and the payments recorded against it,
+// so the Work Board and Receivables cannot disagree.
 model Payment {
   id         Int      @id @default(autoincrement())
-  clientId   String
-  client     Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  taskId     String
+  task       Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
   // Whole rupees, always more than zero.
   amount     Int
   receivedAt DateTime @default(now())
   note       String?
 
-  @@index([clientId])
+  @@index([taskId])
 }
 
 // A message sent from the public landing page. Anyone can create one; only

@@ -361,229 +361,21 @@ test("PATCH /api/tasks/:id rejects invalid work details without changing the tas
   assert.deepEqual(await (await get("/api/tasks/NK-102")).json(), before);
 });
 
-test("GET /api/clients returns receivables with valid statuses", async () => {
-  const res = await get("/api/clients");
-  assert.equal(res.status, 200);
-  const clients = await res.json();
-  assert.ok(clients.length >= 6, "expected at least the 6 seeded clients");
-  for (const c of clients) {
-    assert.ok(["paid", "due-soon", "overdue"].includes(c.status), `bad status on ${c.id}: ${c.status}`);
-    assert.equal(typeof c.due, "number");
-    assert.ok(!Number.isNaN(Date.parse(c.invoiceDate)), `bad invoiceDate on ${c.id}`);
-    assert.ok(!Number.isNaN(Date.parse(c.lastCall)), `bad lastCall on ${c.id}`);
-  }
-});
 
-test("PATCH /api/clients/:id logs a call by moving lastCall to now", async () => {
-  const before = (await (await get("/api/clients")).json()).find((c) => c.id === "c1");
-  assert.ok(before, "seed client c1 missing");
 
-  const res = await patch("/api/clients/c1", {});
-  assert.equal(res.status, 200);
-  const after = await res.json();
-  assert.ok(Date.parse(after.lastCall) > Date.parse(before.lastCall), "lastCall did not advance");
-  assert.ok(Date.now() - Date.parse(after.lastCall) < 60_000, "lastCall is not close to now");
 
-  await prisma.client.update({ where: { id: "c1" }, data: { lastCall: new Date(before.lastCall) } });
-});
 
-test("PATCH /api/clients/:id returns 404 for an unknown client", async () => {
-  const res = await patch("/api/clients/c999", {});
-  assert.equal(res.status, 404);
-});
 
-// Runs fn against seed client c1 and always restores its original row.
-async function withRestoredC1(fn) {
-  const original = await prisma.client.findUnique({ where: { id: "c1" } });
-  assert.ok(original, "seed client c1 missing");
-  try {
-    await fn(original);
-  } finally {
-    const { id, ...rest } = original;
-    await prisma.client.update({ where: { id }, data: rest });
-  }
-}
 
-test("PATCH /api/clients/:id edits only the fields sent and leaves lastCall alone", async () => {
-  await withRestoredC1(async (original) => {
-    const res = await patch("/api/clients/c1", {
-      name: "  Renamed  ",
-      due: 0,
-      status: "paid",
-      notes: "edited",
-      invoiceDate: "2026-01-02",
-      id: "c999",
-    });
-    assert.equal(res.status, 200);
-    const c = await res.json();
-    assert.equal(c.id, "c1");
-    assert.equal(c.name, "Renamed");
-    assert.equal(c.due, 0);
-    assert.equal(c.status, "paid");
-    assert.equal(c.notes, "edited");
-    assert.equal(c.invoiceDate, "2026-01-02T00:00:00.000Z");
-    assert.equal(c.contact, original.contact);
-    assert.equal(c.phone, original.phone);
-    assert.equal(c.lastCall, original.lastCall.toISOString());
-  });
-});
 
-test("PATCH /api/clients/:id sets lastCall and clears notes when sent", async () => {
-  await withRestoredC1(async () => {
-    const res = await patch("/api/clients/c1", { lastCall: "2026-02-03T04:05:00Z", notes: null });
-    assert.equal(res.status, 200);
-    const c = await res.json();
-    assert.equal(c.lastCall, "2026-02-03T04:05:00.000Z");
-    assert.equal(c.notes, null);
-  });
-});
 
-test("PATCH /api/clients/:id rejects invalid fields with 400 and changes nothing", async () => {
-  await withRestoredC1(async (original) => {
-    const bad = [
-      { name: "  " },
-      { contact: 5 },
-      { phone: "" },
-      { due: -1 },
-      { due: 1.5 },
-      { due: "100" },
-      { status: "late" },
-      { invoiceDate: "2026-02-30" },
-      { invoiceDate: "nope" },
-      { lastCall: "nope" },
-      { lastCall: null },
-      { notes: 7 },
-      { name: "Fine", due: -1 },
-    ];
-    for (const body of bad) {
-      const res = await patch("/api/clients/c1", body);
-      assert.equal(res.status, 400, JSON.stringify(body));
-      assert.equal(typeof (await res.json()).error, "string");
-    }
-    assert.deepEqual(await prisma.client.findUnique({ where: { id: "c1" } }), original);
-  });
-});
 
-test("PATCH /api/clients/:id with no body logs a call", async () => {
-  await withRestoredC1(async (original) => {
-    const res = await fetch(base + "/api/clients/c1", { method: "PATCH" });
-    assert.equal(res.status, 200);
-    const c = await res.json();
-    assert.ok(Date.parse(c.lastCall) > original.lastCall.getTime());
-    assert.equal(c.name, original.name);
-  });
-});
 
-test("PATCH /api/clients/:id returns 404 for an unknown client even with fields", async () => {
-  const res = await patch("/api/clients/c999", { name: "X" });
-  assert.equal(res.status, 404);
-});
 
-const validClient = {
-  name: "Test Client",
-  contact: "Tester",
-  phone: "+91 99999 00000",
-  due: 12000,
-  invoiceDate: "2026-03-05",
-  status: "due-soon",
-};
-const clientCount = () => prisma.client.count();
 
-// POSTs a client and always deletes it afterwards, even if assertions fail.
-async function withCreatedClient(body, fn) {
-  const res = await post("/api/clients", body);
-  const payload = await res.json();
-  try {
-    await fn(res, payload);
-  } finally {
-    if (res.status === 201) await prisma.client.deleteMany({ where: { id: payload.id } });
-  }
-}
 
-test("POST /api/clients creates a client with the next c# id and defaults", async () => {
-  const rows = await prisma.client.findMany({ select: { id: true } });
-  const max = Math.max(0, ...rows.map((r) => Number(/^c(\d+)$/.exec(r.id)?.[1] ?? 0)));
-  const n = await clientCount();
-  const t0 = Date.now();
 
-  await withCreatedClient(validClient, async (res, created) => {
-    assert.equal(res.status, 201);
-    assert.equal(created.id, `c${max + 1}`);
-    assert.equal(created.name, "Test Client");
-    assert.equal(created.due, 12000);
-    assert.equal(created.status, "due-soon");
-    assert.equal(created.notes, null);
-    assert.equal(created.invoiceDate, "2026-03-05T00:00:00.000Z");
-    assert.ok(Date.parse(created.lastCall) >= t0 - 1000 && Date.now() - Date.parse(created.lastCall) < 60_000);
-    assert.equal(await clientCount(), n + 1);
-  });
-  assert.equal(await clientCount(), n);
-});
 
-test("POST /api/clients accepts notes, due of 0 and ISO timestamps", async () => {
-  const body = { ...validClient, due: 0, notes: "Pay by Friday", invoiceDate: "2026-03-05T10:30:00Z", lastCall: "2026-03-07" };
-  await withCreatedClient(body, async (res, created) => {
-    assert.equal(res.status, 201);
-    assert.equal(created.due, 0);
-    assert.equal(created.notes, "Pay by Friday");
-    assert.equal(created.invoiceDate, "2026-03-05T10:30:00.000Z");
-    assert.equal(created.lastCall, "2026-03-07T00:00:00.000Z");
-  });
-});
-
-test("POST /api/clients returns 400 for a missing required field", async () => {
-  const n = await clientCount();
-  for (const field of Object.keys(validClient)) {
-    const body = { ...validClient };
-    delete body[field];
-    await withCreatedClient(body, async (res, payload) => {
-      assert.equal(res.status, 400, `missing ${field}`);
-      assert.match(payload.error, new RegExp(field));
-    });
-  }
-  assert.equal(await clientCount(), n);
-});
-
-test("POST /api/clients returns 400 for invalid values", async () => {
-  const n = await clientCount();
-  const bad = [
-    { status: "late" },
-    { due: -1 },
-    { due: 10.5 },
-    { due: "100" },
-    { invoiceDate: "not a date" },
-    { invoiceDate: "2026-02-30" },
-    { invoiceDate: "05/03/2026" },
-    { lastCall: "yesterday" },
-    { name: "   " },
-    { notes: 5 },
-  ];
-  for (const override of bad) {
-    await withCreatedClient({ ...validClient, ...override }, async (res, payload) => {
-      assert.equal(res.status, 400, JSON.stringify(override));
-      assert.equal(typeof payload.error, "string");
-    });
-  }
-  assert.equal(await clientCount(), n);
-});
-
-test("DELETE /api/clients/:id removes a client and returns 204 with no body", async () => {
-  await withCreatedClient(validClient, async (_res, created) => {
-    const res = await fetch(`${base}/api/clients/${created.id}`, { method: "DELETE" });
-    assert.equal(res.status, 204);
-    assert.equal(await res.text(), "");
-    const list = await (await get("/api/clients")).json();
-    assert.ok(!list.some((c) => c.id === created.id));
-  });
-});
-
-test("DELETE /api/clients/:id returns 404 for an unknown client", async () => {
-  const n = await clientCount();
-  const res = await fetch(`${base}/api/clients/c9999`, { method: "DELETE" });
-  assert.equal(res.status, 404);
-  assert.match((await res.json()).error, /c9999/);
-  assert.equal(await clientCount(), n);
-});
 
 /* ---- task timestamps --------------------------------------------- */
 
@@ -644,97 +436,12 @@ test("a task created as done is completed at creation, and clients cannot set th
 
 /* ---- payments ---------------------------------------------------- */
 
-const pay = (id, body) => post(`/api/clients/${id}/payments`, body);
-const paymentsOf = async (id) => (await get(`/api/clients/${id}/payments`)).json();
 
-test("POST /api/clients/:id/payments records a part payment and lowers the dues", async () => {
-  await withCreatedClient({ ...validClient, due: 12000, status: "overdue" }, async (_res, created) => {
-    const t0 = Date.now();
-    const res = await pay(created.id, { amount: 5000, note: "  Cheque 4412 " });
-    assert.equal(res.status, 201);
-    const { payment, client } = await res.json();
-    assert.equal(payment.clientId, created.id);
-    assert.equal(payment.amount, 5000);
-    assert.equal(payment.note, "Cheque 4412");
-    assert.ok(Date.parse(payment.receivedAt) >= t0 - 1000);
-    assert.equal(client.due, 7000);
-    assert.equal(client.status, "overdue", "a part payment does not change the status");
 
-    const stored = (await (await get("/api/clients")).json()).find((c) => c.id === created.id);
-    assert.equal(stored.due, 7000);
-    assert.deepEqual(await paymentsOf(created.id), [payment]);
-  });
-});
 
-test("POST /api/clients/:id/payments marks the client paid when the dues are cleared", async () => {
-  await withCreatedClient({ ...validClient, due: 12000, status: "overdue" }, async (_res, created) => {
-    await pay(created.id, { amount: 2000, receivedAt: "2026-10-01" });
-    const res = await pay(created.id, { amount: 10000 });
-    assert.equal(res.status, 201);
-    const { client } = await res.json();
-    assert.equal(client.due, 0);
-    assert.equal(client.status, "paid");
 
-    const list = await paymentsOf(created.id);
-    assert.deepEqual(list.map((p) => p.amount), [10000, 2000], "newest first");
-    assert.equal(list[1].receivedAt, "2026-10-01T00:00:00.000Z");
-    assert.equal(list[1].note, null);
-    assert.equal(list.reduce((sum, p) => sum + p.amount, 0), 12000);
-  });
-});
 
-test("POST /api/clients/:id/payments rejects bad amounts and overpayment without changing anything", async () => {
-  await withCreatedClient({ ...validClient, due: 12000 }, async (_res, created) => {
-    for (const body of [
-      { amount: 0 },
-      { amount: -100 },
-      { amount: 10.5 },
-      { amount: "5000" },
-      {},
-      { amount: 12001 },
-      { amount: 100, note: 5 },
-      { amount: 100, receivedAt: "yesterday" },
-    ]) {
-      const res = await pay(created.id, body);
-      assert.equal(res.status, 400, JSON.stringify(body));
-      assert.equal(typeof (await res.json()).error, "string");
-    }
-    assert.match((await (await pay(created.id, { amount: 12001 })).json()).error, /more than the outstanding 12000/);
-    const stored = (await (await get("/api/clients")).json()).find((c) => c.id === created.id);
-    assert.equal(stored.due, 12000);
-    assert.deepEqual(await paymentsOf(created.id), []);
-  });
-});
 
-test("two payments arriving together cannot take the dues below zero", async () => {
-  await withCreatedClient({ ...validClient, due: 10000 }, async (_res, created) => {
-    const results = await Promise.all([pay(created.id, { amount: 7000 }), pay(created.id, { amount: 7000 })]);
-    assert.deepEqual(results.map((r) => r.status).sort(), [201, 400]);
-    const stored = (await (await get("/api/clients")).json()).find((c) => c.id === created.id);
-    assert.equal(stored.due, 3000);
-    assert.equal((await paymentsOf(created.id)).length, 1);
-  });
-});
-
-test("payments endpoints return 404 for an unknown client", async () => {
-  assert.equal((await get("/api/clients/c9999/payments")).status, 404);
-  const res = await pay("c9999", { amount: 100 });
-  assert.equal(res.status, 404);
-  assert.match((await res.json()).error, /c9999/);
-});
-
-test("deleting a client removes its payments", async () => {
-  const before = await prisma.payment.count();
-  let id;
-  await withCreatedClient({ ...validClient, due: 500 }, async (_res, created) => {
-    id = created.id;
-    await pay(id, { amount: 200 });
-    assert.equal(await prisma.payment.count({ where: { clientId: id } }), 1);
-    assert.equal((await fetch(`${base}/api/clients/${id}`, { method: "DELETE" })).status, 204);
-    assert.equal(await prisma.payment.count({ where: { clientId: id } }), 0);
-  });
-  assert.equal(await prisma.payment.count(), before);
-});
 
 /* ---- staff login ------------------------------------------------- */
 
@@ -774,20 +481,21 @@ test("with no APP_PASSWORD the API is open and the session says login is not req
 
 test("with APP_PASSWORD set, data endpoints need a token but health and session do not", async () => {
   await withLogin(async () => {
-    for (const path of ["/api/tasks", "/api/tasks/NK-101", "/api/clients", "/api/employees"]) {
+    for (const path of ["/api/tasks", "/api/tasks/NK-101", "/api/tasks/NK-101/payments", "/api/employees", "/api/activity"]) {
       const res = await get(path);
       assert.equal(res.status, 401, path);
       assert.equal(typeof (await res.json()).error, "string");
     }
     assert.equal((await post("/api/tasks", validTask)).status, 401);
     assert.equal((await patch("/api/tasks/NK-102", { status: "done" })).status, 401);
-    assert.equal((await fetch(`${base}/api/clients/c1`, { method: "DELETE" })).status, 401);
-    assert.equal((await get("/api/clients/c1/payments")).status, 401);
-    assert.equal((await post("/api/clients/c1/payments", { amount: 1 })).status, 401);
+    assert.equal((await fetch(`${base}/api/tasks/NK-101`, { method: "DELETE" })).status, 401);
+    assert.equal((await post("/api/tasks/NK-101/payments", { amount: 1 })).status, 401);
+    assert.equal((await post("/api/tasks/NK-101/reminder", {})).status, 401);
     assert.equal((await get("/api/health")).status, 200);
     assert.deepEqual(await who(await get("/api/auth/session")), { required: true, authenticated: false, role: null, employeeId: null, name: null });
   });
-  assert.equal(await prisma.client.count({ where: { id: "c1" } }), 1, "an unauthenticated delete went through");
+  assert.equal(await prisma.task.count({ where: { id: "NK-101" } }), 1, "an unauthenticated delete went through");
+  assert.equal(await prisma.payment.count({ where: { taskId: "NK-101" } }), 0, "an unauthenticated payment went through");
 });
 
 test("the right password gives a token that opens the API", async () => {
@@ -799,7 +507,7 @@ test("the right password gives a token that opens the API", async () => {
     assert.ok(Date.parse(expiresAt) > Date.now() + TOKEN_TTL_MS - 60_000);
 
     assert.equal((await authed("/api/tasks", token)).status, 200);
-    assert.equal((await authed("/api/clients", token)).status, 200);
+    assert.equal((await authed("/api/employees", token)).status, 200);
     assert.deepEqual(await who(await authed("/api/auth/session", token)), { required: true, authenticated: true, role: "staff", employeeId: null, name: null });
   });
 });
@@ -1064,80 +772,9 @@ test("each password signs in with its own role, and the session reports it", asy
   });
 });
 
-test("staff get the client list without amounts; an admin gets them", async () => {
-  await withRoles(async ({ staff, admin }) => {
-    const forStaff = await (await authed("/api/clients", staff)).json();
-    assert.equal(forStaff.length, 6);
-    for (const c of forStaff) {
-      assert.equal("due" in c, false, `${c.id} must not carry the amount`);
-      assert.ok(["paid", "due-soon", "overdue"].includes(c.status));
-      assert.ok(c.name && c.phone && c.lastCall);
-    }
-    const forAdmin = await (await authed("/api/clients", admin)).json();
-    assert.equal(forAdmin.find((c) => c.id === "c1").due, 184000);
-  });
-});
 
-test("staff can log a reminder call and the reply still has no amount", async () => {
-  const before = await prisma.client.findUnique({ where: { id: "c2" } });
-  try {
-    await withRoles(async ({ staff }) => {
-      const res = await authed("/api/clients/c2", staff, jsonBody("PATCH", {}));
-      assert.equal(res.status, 200);
-      const body = await res.json();
-      assert.equal("due" in body, false);
-      assert.ok(Date.parse(body.lastCall) > before.lastCall.getTime());
-    });
-  } finally {
-    await prisma.client.update({ where: { id: "c2" }, data: { lastCall: before.lastCall } });
-  }
-});
 
-test("staff cannot add, edit or delete clients, or see or record payments", async () => {
-  const before = await prisma.client.findUnique({ where: { id: "c1" } });
-  const count = await prisma.client.count();
-  const payments = await prisma.payment.count();
-  await withRoles(async ({ staff }) => {
-    const newClient = { name: "Role Test Client", contact: "A", phone: "1", due: 100, invoiceDate: "2026-11-01", status: "due-soon" };
-    const attempts = [
-      ["/api/clients", jsonBody("POST", newClient)],
-      ["/api/clients/c1", jsonBody("PATCH", { due: 1 })],
-      ["/api/clients/c1", jsonBody("PATCH", { status: "paid" })],
-      ["/api/clients/c1", jsonBody("PATCH", { notes: "changed" })],
-      ["/api/clients/c1", { method: "DELETE" }],
-      ["/api/clients/c1/payments", {}],
-      ["/api/clients/c1/payments", jsonBody("POST", { amount: 1000 })],
-    ];
-    for (const [path, options] of attempts) {
-      const res = await authed(path, staff, options);
-      assert.equal(res.status, 403, `${options.method ?? "GET"} ${path} ${options.body ?? ""}`);
-      const text = await res.text();
-      assert.match(text, /admin/i);
-      assert.doesNotMatch(text, /184000/);
-    }
-  });
-  assert.deepEqual(await prisma.client.findUnique({ where: { id: "c1" } }), before);
-  assert.equal(await prisma.client.count(), count);
-  assert.equal(await prisma.payment.count(), payments);
-});
 
-test("an admin can edit a client and record a payment", async () => {
-  const before = await prisma.client.findUnique({ where: { id: "c3" } });
-  try {
-    await withRoles(async ({ admin }) => {
-      const edited = await authed("/api/clients/c3", admin, jsonBody("PATCH", { notes: "admin edit" }));
-      assert.equal(edited.status, 200);
-      assert.equal((await edited.json()).due, before.due);
-      const paid = await authed("/api/clients/c3/payments", admin, jsonBody("POST", { amount: 2000 }));
-      assert.equal(paid.status, 201);
-      assert.equal((await paid.json()).client.due, before.due - 2000);
-      assert.equal((await authed("/api/clients/c3/payments", admin)).status, 200);
-    });
-  } finally {
-    await prisma.payment.deleteMany({ where: { clientId: "c3" } });
-    await prisma.client.update({ where: { id: "c3" }, data: { due: before.due, status: before.status, notes: before.notes } });
-  }
-});
 
 test("staff and admin can both use the Work Board and enquiries", async () => {
   await withRoles(async ({ staff, admin }) => {
@@ -1152,39 +789,32 @@ test("staff and admin can both use the Work Board and enquiries", async () => {
 test("a token cannot be relabelled as admin, and each role's token dies with its own password", async () => {
   await withRoles(async ({ staff, admin }) => {
     const relabelled = staff.replace(/^staff\./, "admin.");
-    assert.equal((await authed("/api/clients", relabelled)).status, 401);
+    const money = "/api/tasks/NK-101/payments";
+    assert.equal((await authed(money, relabelled)).status, 401);
+    assert.equal((await authed(money, admin)).status, 200);
 
     process.env.ADMIN_PASSWORD = "changed-admin-password";
-    assert.equal((await authed("/api/clients", admin)).status, 401, "old admin token");
-    assert.equal((await authed("/api/clients", staff)).status, 200, "staff are not signed out");
+    assert.equal((await authed(money, admin)).status, 401, "old admin token");
+    assert.equal((await authed("/api/tasks", staff)).status, 200, "staff are not signed out");
     process.env.ADMIN_PASSWORD = ADMIN_PASSWORD;
 
     delete process.env.ADMIN_PASSWORD;
-    assert.equal((await authed("/api/clients", admin)).status, 401, "no admin password, no admin");
+    assert.equal((await authed(money, admin)).status, 401, "no admin password, no admin");
     assert.equal((await signIn(ADMIN_PASSWORD)).status, 401);
     process.env.ADMIN_PASSWORD = ADMIN_PASSWORD;
   });
 });
 
-test("with only the office password set, nobody sees amounts", async () => {
-  await withLogin(async () => {
-    const { token, role } = await (await signIn(PASSWORD)).json();
-    assert.equal(role, "staff");
-    const list = await (await authed("/api/clients", token)).json();
-    assert.equal(list.some((c) => "due" in c), false);
-    assert.equal((await authed("/api/clients/c1/payments", token)).status, 403);
-  });
-});
 
 test("with only the admin password set, login is still required and that password is admin", async () => {
   process.env.ADMIN_PASSWORD = ADMIN_PASSWORD;
   clearFailedLogins();
   try {
-    assert.equal((await get("/api/clients")).status, 401);
+    assert.equal((await get("/api/tasks")).status, 401);
     assert.equal((await signIn(PASSWORD)).status, 401);
     const { token, role } = await (await signIn(ADMIN_PASSWORD)).json();
     assert.equal(role, "admin");
-    assert.equal((await (await authed("/api/clients", token)).json())[0].due, 184000);
+    assert.equal((await (await authed("/api/tasks/NK-101", token)).json()).fee, 40000);
   } finally {
     delete process.env.ADMIN_PASSWORD;
     clearFailedLogins();
@@ -1446,7 +1076,7 @@ test("the admin password signs in as admin whichever shared choice is picked", a
       assert.equal(res.status, 200, String(as));
       const { token, role } = await res.json();
       assert.equal(role, "admin");
-      assert.equal((await (await authed("/api/clients", token)).json())[0].due, 184000, "amounts are visible");
+      assert.equal((await (await authed("/api/tasks/NK-101", token)).json()).fee, 40000, "amounts are visible");
     }
   });
 });
@@ -1587,8 +1217,11 @@ test("a refused, invalid or unchanged save leaves no entry in the activity log",
     assert.equal((await authed("/api/tasks/NK-102", admin, jsonBody("PATCH", { priority: "urgent" }))).status, 400);
     assert.equal((await authed("/api/tasks/NK-999", admin, jsonBody("PATCH", { status: "done" }))).status, 404);
     assert.equal((await authed("/api/tasks/NK-999", admin, { method: "DELETE" })).status, 404);
-    assert.equal((await authed("/api/clients/c1", staff, jsonBody("PATCH", { due: 1 }))).status, 403);
-    assert.equal((await authed("/api/clients/c1/payments", admin, jsonBody("POST", { amount: 10 ** 9 }))).status, 400);
+    assert.equal((await authed("/api/tasks/NK-102", staff, jsonBody("PATCH", { fee: 1 }))).status, 403);
+    assert.equal((await authed("/api/tasks/NK-102/payments", staff, jsonBody("POST", { amount: 100 }))).status, 403);
+    assert.equal((await authed("/api/tasks/NK-102/payments", admin, jsonBody("POST", { amount: 10 ** 9 }))).status, 400);
+    assert.equal((await authed("/api/tasks/NK-105/payments", admin, jsonBody("POST", { amount: 100 }))).status, 400, "no amount to charge yet");
+    assert.equal((await authed("/api/tasks/NK-102/payments/999999", admin, { method: "DELETE" })).status, 404);
     assert.equal((await authed("/api/enquiries/999999", admin, jsonBody("PATCH", { status: "closed" }))).status, 404);
     // Saving the same values again is not a change.
     const same = { status: task.status, priority: task.priority, title: task.title };
@@ -1611,55 +1244,6 @@ test("a change is not saved if its activity entry cannot be written", async () =
   }
 });
 
-test("client records, reminder calls and payments are logged with their amounts", async () => {
-  await withRoles(async ({ admin, staff }) => {
-    const mark = await newestLogId();
-    const created = await authed("/api/clients", admin, jsonBody("POST", validClient));
-    assert.equal(created.status, 201);
-    const { id } = await created.json();
-    try {
-      assert.equal((await authed(`/api/clients/${id}`, staff, jsonBody("PATCH", {}))).status, 200);
-      assert.equal((await authed(`/api/clients/${id}`, admin, jsonBody("PATCH", { due: 10000, notes: "Revised" }))).status, 200);
-      assert.equal((await authed(`/api/clients/${id}/payments`, admin, jsonBody("POST", { amount: 4000, note: "Cheque" }))).status, 201);
-      assert.equal((await authed(`/api/clients/${id}/payments`, admin, jsonBody("POST", { amount: 6000 }))).status, 201);
-      assert.equal((await authed(`/api/clients/${id}`, admin, { method: "DELETE" })).status, 204);
-
-      const entries = await historyOf(admin, "client", id, mark);
-      assert.deepEqual(brief(entries), [
-        "client.deleted by Admin",
-        "payment.recorded by Admin",
-        "payment.recorded by Admin",
-        "client.updated by Admin",
-        "client.call_logged by Office sign-in",
-        "client.created by Admin",
-      ]);
-      const [deleted, cleared, firstPayment, edited, call, added] = entries;
-      assert.equal(added.summary, "Added client “Test Client” with ₹12,000 due");
-      assert.deepEqual(added.changes.due, { from: null, to: 12000 });
-      assert.equal(call.summary, "Logged a reminder call to “Test Client”");
-      assert.deepEqual(Object.keys(call.changes), ["lastCall"]);
-      assert.equal(edited.summary, "Edited client “Test Client”: changed amount due, notes");
-      assert.deepEqual(edited.changes, { due: { from: 12000, to: 10000 }, notes: { from: null, to: "Revised" } });
-      assert.equal(firstPayment.summary, "Recorded ₹4,000 received from “Test Client”; ₹6,000 still due");
-      assert.deepEqual(firstPayment.changes.due, { from: 10000, to: 6000 });
-      assert.deepEqual(firstPayment.changes.note, { from: null, to: "Cheque" });
-      assert.ok(!("status" in firstPayment.changes));
-      assert.deepEqual(cleared.changes.due, { from: 6000, to: 0 });
-      assert.deepEqual(cleared.changes.status, { from: "due-soon", to: "paid" });
-      // Deleting a client deletes its payments; the entry keeps both.
-      assert.equal(deleted.summary, "Deleted client “Test Client” with ₹0 due and 2 recorded payments");
-      assert.deepEqual(deleted.changes.payments.from.map((p) => [p.amount, p.note]), [[4000, "Cheque"], [6000, null]]);
-      assert.deepEqual(deleted.changes.name, { from: "Test Client", to: null });
-
-      assert.deepEqual(brief(await historyOf(admin, "client", id, mark, "&type=payment")), [
-        "payment.recorded by Admin",
-        "payment.recorded by Admin",
-      ]);
-    } finally {
-      await prisma.client.deleteMany({ where: { id } });
-    }
-  });
-});
 
 test("an enquiry is logged from the website visitor through to its deletion", async () => {
   await cleanEnquiries();
@@ -1805,5 +1389,297 @@ test("the activity log cannot be edited or emptied: there is no route, and the d
     assert.deepEqual(await prisma.activityLog.findUnique({ where: { id: entry.id } }), entry);
   } finally {
     await cleanEnquiries();
+  }
+});
+
+/* ---- receivables: amounts and payments per ticket ----------------------- */
+// Seeded amounts to charge: NK-101 40000, NK-102 18000, NK-110 0 (not charged),
+// NK-105 none yet.
+
+const pay = (id, body) => post(`/api/tasks/${id}/payments`, body);
+const paymentsOf = async (id) => (await get(`/api/tasks/${id}/payments`)).json();
+const taskNow = async (id) => (await get(`/api/tasks/${id}`)).json();
+const billing = ({ fee, received, paymentStatus }) => ({ fee, received, paymentStatus });
+
+// Runs fn against a seeded task and always puts back its row and removes the
+// payments recorded against it.
+async function withRestoredTask(id, fn) {
+  const original = await prisma.task.findUnique({ where: { id } });
+  assert.ok(original, `seed task ${id} missing`);
+  assert.equal(await prisma.payment.count({ where: { taskId: id } }), 0, `${id} should start with no payments`);
+  try {
+    await fn(original);
+  } finally {
+    await prisma.payment.deleteMany({ where: { taskId: id } });
+    const rest = { ...original };
+    delete rest.id;
+    await prisma.task.update({ where: { id }, data: rest });
+  }
+}
+
+test("every task has a payment status worked out from its amount and payments", async () => {
+  const tasks = await (await get("/api/tasks")).json();
+  for (const t of tasks) {
+    assert.ok(["unset", "unpaid", "part", "paid"].includes(t.paymentStatus), `${t.id}: ${t.paymentStatus}`);
+    assert.equal(typeof t.received, "number");
+    assert.ok(t.fee === null || Number.isInteger(t.fee));
+  }
+  const byId = Object.fromEntries(tasks.map((t) => [t.id, t]));
+  assert.deepEqual(billing(byId["NK-101"]), { fee: 40000, received: 0, paymentStatus: "unpaid" });
+  assert.deepEqual(billing(byId["NK-105"]), { fee: null, received: 0, paymentStatus: "unset" });
+  assert.deepEqual(billing(byId["NK-110"]), { fee: 0, received: 0, paymentStatus: "paid" }, "work that is not charged counts as paid");
+  assert.deepEqual(billing(await taskNow("NK-101")), { fee: 40000, received: 0, paymentStatus: "unpaid" });
+});
+
+test("a part payment makes the ticket part paid, the rest makes it paid, and the history lists both", async () => {
+  await withRestoredTask("NK-102", async () => {
+    const first = await pay("NK-102", { amount: 8000, note: "  Advance by cheque  ", receivedAt: "2026-11-01" });
+    assert.equal(first.status, 201);
+    const a = await first.json();
+    assert.deepEqual([a.payment.taskId, a.payment.amount, a.payment.note, a.payment.receivedAt], ["NK-102", 8000, "Advance by cheque", "2026-11-01T00:00:00.000Z"]);
+    assert.deepEqual(billing(a.task), { fee: 18000, received: 8000, paymentStatus: "part" });
+    assert.deepEqual(billing(await taskNow("NK-102")), { fee: 18000, received: 8000, paymentStatus: "part" });
+
+    const second = await pay("NK-102", { amount: 10000 });
+    assert.equal(second.status, 201);
+    const b = await second.json();
+    assert.equal(b.payment.note, null);
+    assert.ok(Math.abs(Date.parse(b.payment.receivedAt) - Date.now()) < 5000, "receivedAt defaults to now");
+    assert.deepEqual(billing(b.task), { fee: 18000, received: 18000, paymentStatus: "paid" });
+
+    assert.deepEqual((await paymentsOf("NK-102")).map((p) => p.amount), [10000, 8000], "newest first");
+    // The work itself is untouched: payment and progress are separate.
+    assert.equal((await taskNow("NK-102")).status, "todo");
+    assert.equal((await pay("NK-102", { amount: 1 })).status, 400, "nothing is left to pay");
+  });
+});
+
+test("payments reject bad amounts, overpayment and a ticket with no amount, and change nothing", async () => {
+  await withRestoredTask("NK-102", async () => {
+    for (const amount of [0, -5, 1.5, "100", null, undefined]) {
+      assert.equal((await pay("NK-102", { amount })).status, 400, `amount ${amount}`);
+    }
+    const over = await pay("NK-102", { amount: 18001 });
+    assert.equal(over.status, 400);
+    assert.match((await over.json()).error, /more than the outstanding 18000/);
+    assert.equal((await pay("NK-102", { amount: 100, note: 5 })).status, 400);
+    assert.equal((await pay("NK-102", { amount: 100, receivedAt: "yesterday" })).status, 400);
+    const unset = await pay("NK-105", { amount: 100 });
+    assert.equal(unset.status, 400);
+    assert.match((await unset.json()).error, /Set the amount to charge for NK-105/);
+    assert.equal((await pay("NK-999", { amount: 100 })).status, 404);
+    assert.equal((await get("/api/tasks/NK-999/payments")).status, 404);
+    assert.deepEqual(await paymentsOf("NK-102"), []);
+    assert.equal(await prisma.payment.count({ where: { taskId: "NK-105" } }), 0);
+  });
+});
+
+test("two payments arriving together cannot add up to more than the amount to charge", async () => {
+  await withRestoredTask("NK-102", async () => {
+    const results = await Promise.all([pay("NK-102", { amount: 12000 }), pay("NK-102", { amount: 12000 })]);
+    assert.deepEqual(results.map((r) => r.status).sort(), [201, 400]);
+    assert.deepEqual(billing(await taskNow("NK-102")), { fee: 18000, received: 12000, paymentStatus: "part" });
+  });
+});
+
+test("removing a payment takes it back and the status follows", async () => {
+  await withRestoredTask("NK-102", async () => {
+    const { payment: one } = await (await pay("NK-102", { amount: 18000 })).json();
+    assert.equal((await taskNow("NK-102")).paymentStatus, "paid");
+
+    const other = await (await pay("NK-101", { amount: 500 })).json();
+    try {
+      // A payment can only be removed through the ticket it belongs to.
+      assert.equal((await del(`/api/tasks/NK-102/payments/${other.payment.id}`)).status, 404);
+      assert.equal((await del("/api/tasks/NK-102/payments/abc")).status, 404);
+      assert.equal((await del(`/api/tasks/NK-999/payments/${one.id}`)).status, 404);
+      assert.equal(await prisma.payment.count({ where: { id: { in: [one.id, other.payment.id] } } }), 2);
+    } finally {
+      await prisma.payment.deleteMany({ where: { taskId: "NK-101" } });
+    }
+
+    const removed = await del(`/api/tasks/NK-102/payments/${one.id}`);
+    assert.equal(removed.status, 200);
+    assert.deepEqual(billing((await removed.json()).task), { fee: 18000, received: 0, paymentStatus: "unpaid" });
+    assert.deepEqual(await paymentsOf("NK-102"), []);
+    assert.equal((await del(`/api/tasks/NK-102/payments/${one.id}`)).status, 404, "already gone");
+  });
+});
+
+test("the amount to charge can be set, changed and cleared, but never below what was received", async () => {
+  await withRestoredTask("NK-105", async () => {
+    const set = await patch("/api/tasks/NK-105", { fee: 50000 });
+    assert.equal(set.status, 200);
+    assert.deepEqual(billing(await set.json()), { fee: 50000, received: 0, paymentStatus: "unpaid" });
+    for (const fee of [-1, 2.5, "5000", true]) {
+      assert.equal((await patch("/api/tasks/NK-105", { fee })).status, 400, `fee ${fee}`);
+    }
+    assert.equal((await pay("NK-105", { amount: 20000 })).status, 201);
+
+    const low = await patch("/api/tasks/NK-105", { fee: 19999 });
+    assert.equal(low.status, 400);
+    assert.match((await low.json()).error, /cannot be less than the 20000 already received/);
+    assert.equal((await patch("/api/tasks/NK-105", { fee: null })).status, 400, "cannot clear while money is recorded");
+    assert.deepEqual(billing(await taskNow("NK-105")), { fee: 50000, received: 20000, paymentStatus: "part" });
+
+    // Lowering it to exactly what was received settles the ticket.
+    assert.deepEqual(billing(await (await patch("/api/tasks/NK-105", { fee: 20000 })).json()), { fee: 20000, received: 20000, paymentStatus: "paid" });
+    // Raising it reopens the balance.
+    assert.deepEqual(billing(await (await patch("/api/tasks/NK-105", { fee: 30000 })).json()), { fee: 30000, received: 20000, paymentStatus: "part" });
+
+    await prisma.payment.deleteMany({ where: { taskId: "NK-105" } });
+    assert.deepEqual(billing(await (await patch("/api/tasks/NK-105", { fee: null })).json()), { fee: null, received: 0, paymentStatus: "unset" });
+  });
+});
+
+test("new work can be created with an amount, and without one it is waiting for an amount", async () => {
+  const ids = [];
+  try {
+    const priced = await post("/api/tasks", { ...validTask, fee: 7500 });
+    assert.equal(priced.status, 201);
+    const a = await priced.json();
+    ids.push(a.id);
+    assert.deepEqual(billing(a), { fee: 7500, received: 0, paymentStatus: "unpaid" });
+
+    const plain = await post("/api/tasks", validTask);
+    const b = await plain.json();
+    ids.push(b.id);
+    assert.deepEqual(billing(b), { fee: null, received: 0, paymentStatus: "unset" });
+
+    assert.equal((await post("/api/tasks", { ...validTask, fee: -1 })).status, 400);
+    assert.ok((await (await get("/api/tasks")).json()).some((t) => t.id === b.id), "new work appears in the list Receivables reads");
+  } finally {
+    await prisma.task.deleteMany({ where: { id: { in: ids } } });
+  }
+});
+
+test("deleting work removes its payments", async () => {
+  const { id } = await (await post("/api/tasks", { ...validTask, fee: 9000 })).json();
+  try {
+    assert.equal((await pay(id, { amount: 4000 })).status, 201);
+    assert.equal((await del(`/api/tasks/${id}`)).status, 204);
+    assert.equal(await prisma.payment.count({ where: { taskId: id } }), 0);
+  } finally {
+    await prisma.task.deleteMany({ where: { id } });
+  }
+});
+
+test("anyone signed in can log a payment reminder call on a ticket", async () => {
+  await withPeople(async ({ staff, ankit, admin }) => {
+    await withRestoredTask("NK-105", async () => {
+      for (const token of [staff, ankit, admin]) {
+        const started = Date.now();
+        const res = await authed("/api/tasks/NK-105/reminder", token, { method: "POST" });
+        assert.equal(res.status, 200);
+        const task = await res.json();
+        assert.ok(Date.parse(task.lastReminder) >= started - 1000);
+        assert.equal(task.status, "todo", "nothing else changes");
+      }
+      assert.equal((await authed("/api/tasks/NK-999/reminder", staff, { method: "POST" })).status, 404);
+    });
+  });
+});
+
+test("staff see the payment status of every ticket but never an amount, and cannot change money", async () => {
+  await withPeople(async ({ staff, ankit, admin }) => {
+    await withRestoredTask("NK-102", async () => {
+      assert.equal((await authed("/api/tasks/NK-102/payments", admin, jsonBody("POST", { amount: 6000 }))).status, 201);
+
+      const hasNoAmounts = (task, where) => {
+        assert.ok(!("fee" in task) && !("received" in task), `${where} shows an amount`);
+        assert.ok(["unset", "unpaid", "part", "paid"].includes(task.paymentStatus), where);
+      };
+      for (const token of [staff, ankit]) {
+        const list = await (await authed("/api/tasks", token)).json();
+        list.forEach((t) => hasNoAmounts(t, "the list"));
+        assert.equal(list.find((t) => t.id === "NK-102").paymentStatus, "part");
+        hasNoAmounts(await (await authed("/api/tasks/NK-102", token)).json(), "one task");
+        hasNoAmounts(await (await authed("/api/tasks/NK-102/reminder", token, { method: "POST" })).json(), "a reminder reply");
+        hasNoAmounts(await (await authed("/api/tasks/NK-102", token, jsonBody("PATCH", { status: "inprogress" }))).json(), "a move reply");
+        assert.ok(!JSON.stringify(list).includes("18000"));
+
+        // Money is the admin's.
+        const refused = [
+          ["/api/tasks/NK-102", jsonBody("PATCH", { fee: 1 })],
+          ["/api/tasks/NK-102", jsonBody("PATCH", { status: "done", fee: 1 })],
+          ["/api/tasks", jsonBody("POST", { ...validTask, fee: 100 })],
+          ["/api/tasks/NK-102/payments", {}],
+          ["/api/tasks/NK-102/payments", jsonBody("POST", { amount: 1000 })],
+          ["/api/tasks/NK-102/payments/1", { method: "DELETE" }],
+        ];
+        for (const [path, options] of refused) {
+          const res = await authed(path, token, options);
+          assert.equal(res.status, 403, `${options.method ?? "GET"} ${path}`);
+          assert.equal((await res.json()).error, "Only an admin can do this.");
+        }
+      }
+      // Ankit owns NK-102 and may edit its details, but an amount still needs the admin.
+      const created = await authed("/api/tasks", ankit, jsonBody("POST", { ...validTask, assigneeId: "e6" }));
+      const made = await created.json();
+      try {
+        hasNoAmounts(made, "a create reply");
+      } finally {
+        await prisma.task.deleteMany({ where: { id: made.id } });
+      }
+      const seen = await (await authed("/api/tasks/NK-102", admin)).json();
+      assert.deepEqual(billing(seen), { fee: 18000, received: 6000, paymentStatus: "part" }, "nothing a member of staff tried went through");
+    });
+  });
+});
+
+test("amounts, payments, removals and reminders are in the activity log", async () => {
+  await withRoles(async ({ admin, staff }) => {
+    const mark = await newestLogId();
+    const created = await authed("/api/tasks", admin, jsonBody("POST", { ...validTask, title: "Billed work" }));
+    const { id } = await created.json();
+    try {
+      assert.equal((await authed(`/api/tasks/${id}`, admin, jsonBody("PATCH", { fee: 10000 }))).status, 200);
+      assert.equal((await authed(`/api/tasks/${id}/reminder`, staff, { method: "POST" })).status, 200);
+      const paid = await (await authed(`/api/tasks/${id}/payments`, admin, jsonBody("POST", { amount: 4000, note: "Cheque" }))).json();
+      assert.equal((await authed(`/api/tasks/${id}/payments`, admin, jsonBody("POST", { amount: 6000 }))).status, 201);
+      assert.equal((await authed(`/api/tasks/${id}/payments/${paid.payment.id}`, admin, { method: "DELETE" })).status, 200);
+      assert.equal((await authed(`/api/tasks/${id}`, admin, { method: "DELETE" })).status, 204);
+
+      const entries = await historyOf(admin, "task", id, mark);
+      assert.deepEqual(brief(entries), [
+        "task.deleted by Admin",
+        "payment.removed by Admin",
+        "payment.recorded by Admin",
+        "payment.recorded by Admin",
+        "task.reminder_logged by Office sign-in",
+        "task.updated by Admin",
+        "task.created by Admin",
+      ]);
+      const [deleted, removed, second, first, reminder, priced] = entries;
+      assert.equal(priced.summary, `Edited ${id} “Billed work”: changed amount to charge`);
+      assert.deepEqual(priced.changes, { fee: { from: null, to: 10000 } });
+      assert.equal(reminder.summary, `Logged a payment reminder call to “Test client” for ${id}`);
+      assert.deepEqual(Object.keys(reminder.changes), ["lastReminder"]);
+      assert.equal(first.summary, `Recorded ₹4,000 received for ${id} “Billed work”; ₹6,000 still due`);
+      assert.deepEqual(first.changes.received, { from: 0, to: 4000 });
+      assert.deepEqual(first.changes.note, { from: null, to: "Cheque" });
+      assert.equal(second.summary, `Recorded ₹6,000 received for ${id} “Billed work”; now paid in full`);
+      assert.equal(removed.summary, `Removed the payment of ₹4,000 from ${id} “Billed work”; ₹4,000 now due`);
+      assert.deepEqual(removed.changes.received, { from: 10000, to: 6000 });
+      assert.deepEqual(removed.changes.amount, { from: 4000, to: null });
+      // Deleting work deletes its payments; the entry keeps both.
+      assert.equal(deleted.summary, `Deleted ${id} “Billed work” and 1 recorded payment`);
+      assert.deepEqual(deleted.changes.payments.from.map((p) => [p.amount, p.note]), [[6000, null]]);
+      assert.deepEqual(deleted.changes.fee, { from: 10000, to: null });
+
+      assert.deepEqual(brief(await historyOf(admin, "task", id, mark, "&type=payment")), [
+        "payment.removed by Admin",
+        "payment.recorded by Admin",
+        "payment.recorded by Admin",
+      ]);
+    } finally {
+      await prisma.task.deleteMany({ where: { id } });
+    }
+  });
+});
+
+test("the client-wise receivables endpoints are gone", async () => {
+  for (const path of ["/api/clients", "/api/clients/c1", "/api/clients/c1/payments"]) {
+    assert.equal((await get(path)).status, 404, path);
   }
 });

@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { requireAdmin } from "../lib/auth.js";
-import { createTask, deleteTask, getTask, listTasks, updateTask } from "../controllers/tasks.controller.js";
+import { createTask, deleteTask, getTask, listTasks, logReminder, updateTask } from "../controllers/tasks.controller.js";
+import { listPayments, recordPayment, removePayment } from "../controllers/payments.controller.js";
 
 export const tasksRouter = Router();
 
@@ -11,3 +12,10 @@ tasksRouter.post("/", createTask);
 tasksRouter.get("/:id", getTask);
 tasksRouter.patch("/:id", updateTask);
 tasksRouter.delete("/:id", requireAdmin, deleteTask);
+
+// Receivables, ticket by ticket. Anyone signed in can log a reminder call.
+// Anything that shows or changes money needs an admin.
+tasksRouter.post("/:id/reminder", logReminder);
+tasksRouter.get("/:id/payments", requireAdmin, listPayments);
+tasksRouter.post("/:id/payments", requireAdmin, recordPayment);
+tasksRouter.delete("/:id/payments/:paymentId", requireAdmin, removePayment);

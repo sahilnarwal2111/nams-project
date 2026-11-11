@@ -8,7 +8,6 @@ import {
   defaultSignInChoice,
   personalPasswordError,
   sessionRole,
-  paymentPending,
   daysAgo,
   enquiryError,
   enquiryToApi,
@@ -22,22 +21,14 @@ import {
   taskFromForm,
   nextLocalTaskId,
   parseRupees,
-  clientFormError,
-  clientToApi,
-  paymentError,
-  paymentPatchBody,
   paymentToApi,
   paymentFromApi,
-  nextLocalClientId,
   authHeaders,
   sessionState,
   getToken,
   dateFromApi,
   instantFromApi,
   localDay,
-  clientFromApi,
-  clientsFromApi,
-  logCallPatchBody,
 } from "../src/api.js";
 
 const apiTask = {
@@ -86,18 +77,6 @@ test("statusPatchBody sends only status", () => {
   assert.deepEqual(statusPatchBody("inprogress"), { status: "inprogress" });
 });
 
-const apiClient = {
-  id: "c1",
-  name: "Jind Infra",
-  contact: "S",
-  phone: "1",
-  due: 184000,
-  invoiceDate: "2026-05-12T00:00:00.000Z",
-  lastCall: "2026-07-18T23:59:59.999Z",
-  status: "overdue",
-  notes: null,
-};
-
 test("dateFromApi converts ISO timestamps to YYYY-MM-DD", () => {
   assert.equal(dateFromApi("2026-05-12T00:00:00.000Z"), "2026-05-12");
   assert.equal(dateFromApi("2026-07-18T23:59:59.999Z"), "2026-07-18");
@@ -131,30 +110,9 @@ test("instantFromApi passes through short dates and unparseable values", () => {
   assert.equal(instantFromApi(null), null);
 });
 
-test("clientFromApi keeps the invoice date on its UTC day and the last call on its local day", () => {
-  const c = clientFromApi(apiClient);
-  assert.equal(c.invoiceDate, "2026-05-12");
-  assert.equal(c.lastCall, "2026-07-19");
-  assert.equal(c.due, 184000);
-  assert.equal(c.status, "overdue");
-  assert.equal(c.notes, null);
-});
 
-test("clientFromApi does not mutate its input", () => {
-  const copy = structuredClone(apiClient);
-  clientFromApi(apiClient);
-  assert.deepEqual(apiClient, copy);
-});
 
-test("clientsFromApi maps lists", () => {
-  assert.deepEqual(clientsFromApi([]), []);
-  const out = clientsFromApi([apiClient, { ...apiClient, id: "c2", lastCall: "2026-08-01T10:00:00.000Z" }]);
-  assert.deepEqual(out.map((c) => c.lastCall), ["2026-07-19", "2026-08-01"]);
-});
 
-test("logCallPatchBody is empty", () => {
-  assert.deepEqual(logCallPatchBody(), {});
-});
 
 const workForm = {
   title: "  Pond survey ",
@@ -213,15 +171,22 @@ test("nextLocalTaskId continues the NK sequence numerically", () => {
   assert.equal(nextLocalTaskId([{ id: "NK-999" }, { id: "other" }]), "NK-1000");
 });
 
-const clientForm = {
-  name: " Hisar Developers ",
-  contact: " R. Punia ",
-  phone: " +91 90000 22222 ",
-  due: "1,25,000",
-  invoiceDate: "2026-11-01",
-  status: "due-soon",
-  notes: "  ",
-};
+test("taskToApi sends the amount to charge only when the form has that field", () => {
+  assert.equal("fee" in taskToApi(workForm), false, "a non-admin's form has no amount field");
+  assert.equal(taskToApi({ ...workForm, fee: "1,20,000" }).fee, 120000);
+  assert.equal(taskToApi({ ...workForm, fee: "0" }).fee, 0);
+  assert.equal(taskToApi({ ...workForm, fee: "" }).fee, null, "blank means not decided yet");
+  assert.equal(taskFromForm({ ...workForm, fee: "5000" }).fee, 5000);
+});
+
+test("taskFromApi keeps the billing fields and shows the last reminder as a local day", () => {
+  // 20:15 UTC on the 10th is 01:45 on the 11th in India.
+  const t = taskFromApi({ ...apiTask, fee: 40000, received: 15000, paymentStatus: "part", lastReminder: "2026-11-10T20:15:00.000Z" });
+  assert.deepEqual([t.fee, t.received, t.paymentStatus, t.lastReminder], [40000, 15000, "part", "2026-11-11"]);
+  const staff = taskFromApi({ ...apiTask, paymentStatus: "unpaid", lastReminder: null });
+  assert.equal("fee" in staff, false);
+  assert.equal(staff.lastReminder, null);
+});
 
 test("parseRupees reads whole rupees and rejects everything else", () => {
   assert.equal(parseRupees("1,84,000"), 184000);
@@ -233,56 +198,11 @@ test("parseRupees reads whole rupees and rejects everything else", () => {
   }
 });
 
-test("clientFormError accepts a valid form and names each problem", () => {
-  assert.equal(clientFormError(clientForm), null);
-  assert.match(clientFormError({ ...clientForm, name: "  " }), /required/);
-  assert.match(clientFormError({ ...clientForm, phone: "" }), /required/);
-  assert.match(clientFormError({ ...clientForm, due: "12.5" }), /whole number/);
-  assert.match(clientFormError({ ...clientForm, due: "" }), /whole number/);
-  assert.match(clientFormError({ ...clientForm, invoiceDate: "" }), /Invoice date/);
-  assert.match(clientFormError({ ...clientForm, status: "paid" }), /cannot be marked as paid/);
-  assert.equal(clientFormError({ ...clientForm, due: "0", status: "paid" }), null);
-});
 
-test("clientToApi trims text, parses the amount and sends blank notes as null", () => {
-  assert.deepEqual(clientToApi(clientForm), {
-    name: "Hisar Developers",
-    contact: "R. Punia",
-    phone: "+91 90000 22222",
-    due: 125000,
-    invoiceDate: "2026-11-01",
-    status: "due-soon",
-    notes: null,
-  });
-});
 
-test("clientToApi marks a client who owes nothing as paid and never sends lastCall", () => {
-  const body = clientToApi({ ...clientForm, due: "0", status: "overdue", lastCall: "2026-01-01" });
-  assert.equal(body.status, "paid");
-  assert.equal(body.due, 0);
-  assert.equal("lastCall" in body, false);
-});
 
-test("paymentError checks the amount against the dues", () => {
-  const client = { id: "c1", due: 50000, status: "overdue" };
-  assert.equal(paymentError(client, "20,000"), null);
-  assert.equal(paymentError(client, "50000"), null);
-  assert.match(paymentError(client, "50001"), /more than/);
-  assert.match(paymentError(client, "0"), /amount received/);
-  assert.match(paymentError(client, ""), /amount received/);
-  assert.match(paymentError(client, "-10"), /amount received/);
-});
 
-test("paymentPatchBody reduces the dues and marks a cleared account as paid", () => {
-  const client = { id: "c1", due: 50000, status: "overdue" };
-  assert.deepEqual(paymentPatchBody(client, "20,000"), { due: 30000 });
-  assert.deepEqual(paymentPatchBody(client, "50000"), { due: 0, status: "paid" });
-});
 
-test("nextLocalClientId continues the c# sequence numerically", () => {
-  assert.equal(nextLocalClientId([]), "c1");
-  assert.equal(nextLocalClientId([{ id: "c1" }, { id: "c6" }, { id: "c10" }, { id: "x" }]), "c11");
-});
 
 test("authHeaders sends a Bearer token only when signed in", () => {
   assert.deepEqual(authHeaders("abc.def"), { Authorization: "Bearer abc.def" });
@@ -370,20 +290,7 @@ test("sessionRole is admin only when the server says so or sign-in is off", () =
   assert.equal(sessionRole({ required: true, authenticated: false, role: null }), "staff");
 });
 
-test("paymentPending uses the amount when known and the status when it is hidden", () => {
-  assert.equal(paymentPending({ due: 5000, status: "overdue" }), true);
-  assert.equal(paymentPending({ due: 0, status: "paid" }), false);
-  assert.equal(paymentPending({ due: 0, status: "overdue" }), false, "the amount wins for an admin");
-  assert.equal(paymentPending({ status: "overdue" }), true);
-  assert.equal(paymentPending({ status: "due-soon" }), true);
-  assert.equal(paymentPending({ status: "paid" }), false);
-});
 
-test("clientFromApi keeps a client without an amount as it is", () => {
-  const c = clientFromApi({ id: "c1", name: "A", status: "overdue", invoiceDate: "2026-05-12T00:00:00.000Z", lastCall: "2026-07-18T10:00:00.000Z" });
-  assert.equal("due" in c, false);
-  assert.equal(c.invoiceDate, "2026-05-12");
-});
 
 test("canEditTask lets an admin edit anything and a person only their own work", () => {
   const task = { id: "NK-102", assignee: "e6" };

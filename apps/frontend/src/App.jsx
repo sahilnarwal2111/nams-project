@@ -1,11 +1,10 @@
 import { useState, useMemo, useEffect } from "react";
 import {
-  hasApi, fetchEmployees, fetchTasks, updateTaskStatus, fetchClients, logClientCall, localDay,
+  hasApi, fetchEmployees, fetchTasks, updateTaskStatus, localDay,
   createTask, updateTask, deleteTask, taskFromForm, nextLocalTaskId,
-  createClient, updateClient, deleteClient, recordPayment, fetchPayments,
-  clientToApi, clientFormError, paymentError, paymentPatchBody, parseRupees, nextLocalClientId,
+  setTaskFee, recordPayment, fetchPayments, removePayment, logReminder, parseRupees,
   fetchSession, login, logout, onAuthLost,
-  daysAgo, paymentPending, enquiryError,
+  daysAgo, enquiryError,
   fetchActivity,
   fetchTeam, canEditTask, viewerLabel, signInChoices, defaultSignInChoice, personalPasswordError, setEmployeePassword, clearEmployeePassword, sendEnquiry, fetchEnquiries, updateEnquiryStatus, deleteEnquiry,
 } from "./api.js";
@@ -14,10 +13,14 @@ import {
   boardTasks, completedTasks, completedByMonth, RECENT_DAYS,
 } from "./board.js";
 import { pageFromHash, hashForPage, anchorFromHash } from "./route.js";
+import {
+  PAYMENT_LABELS, RECEIVABLE_FILTERS, balanceOf, filterReceivables, receivableCounts, receivableTotals, sortReceivables,
+  parseFee, paymentError, withStatus, applyPayment, removeLocalPayment,
+} from "./receivables.js";
 import { KIND_FILTERS, kindLabel, actorFilters, groupByDay, changeRows, deviceLabel, dayOf, dayLabel, timeLabel } from "./activity.js";
 import {
   Ruler, Route, Building2, Droplets, Plane, Waves,
-  Menu, X, ChevronRight, Clock, PhoneCall,
+  Menu, X, ChevronRight, PhoneCall,
   Mail, Phone, MapPin, ArrowLeft,
   ArrowRight, Filter, ChevronDown, Plus, Pencil, Trash2, CalendarDays, IndianRupee, Lock, LogOut, History, Search, CircleCheck, Send, MessageSquare, KeyRound, UserRound, Eye, Info, ScrollText, RefreshCw
 } from "lucide-react";
@@ -64,7 +67,7 @@ const EMPLOYEES = [
   { id: "e7", name: "Komal", role: "Accounts", initials: "KO" },
 ];
 
-const INITIAL_TASKS = [
+const SAMPLE_TASKS = [
   { id: "NK-101", title: "Topographic survey — Narwana layout", client: "Jind Infra Developers Pvt Ltd", assignee: "e6", status: "done", priority: "high" },
   { id: "NK-102", title: "Boundary survey — Safidon plot 44", client: "Rohtak Builders", assignee: "e6", status: "todo", priority: "low" },
   { id: "NK-103", title: "Drone survey — solar plant site, Hisar", client: "Kaithal Roadways", assignee: "e6", status: "inprogress", priority: "high" },
@@ -89,14 +92,17 @@ const INITIAL_TASKS = [
   { id: "NK-126", title: "Village XYZ pond X-section", client: "Village XYZ Panchayat", assignee: "e4", status: "todo", priority: "low" },
 ];
 
-const INITIAL_CLIENTS = [
-  { id: "c1", name: "Jind Infra Developers Pvt Ltd", contact: "Suresh Malik", phone: "+91 98961 23450", due: 184000, invoiceDate: "2026-05-12", lastCall: "2026-07-18", status: "overdue", notes: "Promised payment after milestone billing on the 25th." },
-  { id: "c2", name: "Jind Municipal Council", contact: "Eng. R. Dahiya", phone: "+91 98123 45678", due: 96000, invoiceDate: "2026-06-20", lastCall: "2026-07-20", status: "due-soon", notes: "Bill in final approval stage at municipal office." },
-  { id: "c3", name: "Rohtak Builders", contact: "Vinod Chhikara", phone: "+91 98221 55678", due: 52000, invoiceDate: "2026-06-02", lastCall: "2026-07-10", status: "overdue", notes: "Escalate to email if no response by Friday." },
-  { id: "c4", name: "Yamuna Bridgeworks", contact: "Neha Sharma", phone: "+91 90211 44890", due: 0, invoiceDate: "2026-05-28", lastCall: "2026-07-05", status: "paid", notes: "Cleared in full. Official receipt dispatched." },
-  { id: "c5", name: "Kaithal Roadways", contact: "Ramesh Sihag", phone: "+91 98811 22990", due: 133000, invoiceDate: "2026-06-15", lastCall: "2026-07-21", status: "due-soon", notes: "Confirmed cheque dispatch, awaiting bank clearance." },
-  { id: "c6", name: "Panipat Industries Assoc.", contact: "Devendra Ahlawat", phone: "+91 97641 33221", due: 76500, invoiceDate: "2026-04-30", lastCall: "2026-07-19", status: "overdue", notes: "Third reminder call made; requested formal statement." },
-];
+// Mock mode only: [amount to charge, received so far] for some of the sample
+// work. The rest has no amount yet; 0 is work that is not charged.
+const SAMPLE_BILLING = {
+  "NK-101": [40000, 40000], "NK-102": [18000, 0], "NK-103": [60000, 20000], "NK-104": [85000, 0], "NK-106": [30000, 30000],
+  "NK-110": [0, 0], "NK-112": [45000, 20000], "NK-113": [25000, 0], "NK-119": [35000, 0],
+};
+const INITIAL_TASKS = SAMPLE_TASKS.map((task) => {
+  const [fee, received] = SAMPLE_BILLING[task.id] ?? [null, 0];
+  const payments = received > 0 ? [{ id: 1, amount: received, note: null, receivedAt: "2026-11-02" }] : [];
+  return withStatus({ ...task, fee, received, payments, lastReminder: null });
+});
 
 const STATUS_META = {
   todo: { label: "To Do", color: C.steel, bg: "#EFECE6" },
@@ -119,10 +125,12 @@ const WORK_TYPES = [
   { id: "printout", label: "Printout" },
 ];
 
-const PAY_STATUS_META = {
-  paid: { label: "Paid", color: C.green, bg: "#EEF3ED" },
-  "due-soon": { label: "Due Soon", color: C.blue, bg: "#EBF3FA" },
-  overdue: { label: "Overdue", color: C.orangeDeep, bg: "#FDF0EA" },
+// Colours for the API's paymentStatus values; the labels are PAYMENT_LABELS.
+const PAYMENT_META = {
+  unset: { color: C.steel, bg: "#F0F2F4" },
+  unpaid: { color: C.orangeDeep, bg: "#FDF0EA" },
+  part: { color: C.blue, bg: "#EBF3FA" },
+  paid: { color: C.green, bg: "#EEF3ED" },
 };
 
 const ENQUIRY_STATUS_META = {
@@ -704,6 +712,8 @@ function WorkForm({ task, employees, onSave, onDelete, onClose, isAdmin = true, 
     ...(task
       ? Object.fromEntries(Object.keys(EMPTY_WORK).map((k) => [k, task[k] ?? EMPTY_WORK[k]]))
       : {}),
+    // Only the admin's form has the amount to charge; blank means not decided.
+    ...(isAdmin ? { fee: task?.fee === null || task?.fee === undefined ? "" : String(task.fee) } : {}),
   }));
   const { busy, error, setError, run } = useDialogAction(onClose);
 
@@ -716,6 +726,10 @@ function WorkForm({ task, employees, onSave, onDelete, onClose, isAdmin = true, 
     if (form.title.trim() === "" || form.client.trim() === "") {
       setError("Work name and customer name are required.");
       return;
+    }
+    if (isAdmin) {
+      const fee = parseFee(form.fee, task?.received ?? 0);
+      if (fee.error) { setError(fee.error); return; }
     }
     run(() => onSave(form));
   };
@@ -791,6 +805,14 @@ function WorkForm({ task, employees, onSave, onDelete, onClose, isAdmin = true, 
               {["high", "medium", "low"].map((p) => <option key={p} value={p}>{PRIORITY_META[p].label}</option>)}
             </select>
           </Field>
+          {isAdmin && (
+            <div className="sm:col-span-2">
+              <Field label="Amount to charge (₹)">
+                <input name="fee" inputMode="numeric" value={form.fee} onChange={set("fee")} style={line} className={INPUT_CLASS} placeholder="Leave blank if not decided yet" />
+              </Field>
+              <p style={{ color: C.steel }} className="f-body text-xs mt-1">Shown to the admin only. Payments are recorded against it in Receivables.</p>
+            </div>
+          )}
           <div className="sm:col-span-2">
             <Field label="Assign to" required>
               <select name="assignee" value={form.assignee} onChange={set("assignee")} required disabled={!isAdmin && Boolean(task)} title={!isAdmin && task ? "Only an admin can reassign work" : undefined} style={line} className={`${INPUT_CLASS} disabled:bg-stone-100 disabled:text-stone-500`}>
@@ -874,9 +896,12 @@ function CompletedList({ tasks, total, employees, saving, viewer, onReopen, onEd
 // view is "board" or "completed" (the list of all finished work); onView
 // switches between them. access (API mode with sign-in on): { adminConfigured,
 // onSwitchSignIn, onOpenTeam }, used to explain what a sign-in can do.
-function WorkBoard({ viewer = { isAdmin: true, employeeId: null }, access = null, view = "board", onView = () => {} }) {
+function WorkBoard({ viewer = { isAdmin: true, employeeId: null }, access = null, view = "board", onView = () => {}, local, setLocal }) {
   const useApi = hasApi();
-  const [tasks, setTasks] = useState(useApi ? [] : INITIAL_TASKS);
+  // Mock mode keeps the tasks in App, so Receivables shows the same tickets.
+  const [remote, setRemote] = useState([]);
+  const tasks = useApi ? remote : local;
+  const setTasks = useApi ? setRemote : setLocal;
   const [employees, setEmployees] = useState(useApi ? [] : EMPLOYEES);
   const [load, setLoad] = useState(useApi ? { state: "loading" } : { state: "ready" });
   const [attempt, setAttempt] = useState(0);
@@ -895,12 +920,13 @@ function WorkBoard({ viewer = { isAdmin: true, employeeId: null }, access = null
     if (editing === "new") {
       const created = useApi
         ? await createTask(form)
-        : { ...taskFromForm(form), id: nextLocalTaskId(tasks), status: "todo", createdAt: new Date().toISOString(), completedAt: null };
+        : withStatus({ fee: null, ...taskFromForm(form), id: nextLocalTaskId(tasks), status: "todo", createdAt: new Date().toISOString(), completedAt: null, received: 0, payments: [], lastReminder: null });
       setTasks((prev) => [...prev, created]);
     } else {
       const id = editing.id;
       const updated = useApi ? await updateTask(id, form) : taskFromForm(form);
-      setTasks((prev) => prev.map((t) => (t.id === id ? { ...t, ...updated } : t)));
+      // In mock mode the payment status follows a changed amount, as on the server.
+      setTasks((prev) => prev.map((t) => (t.id === id ? (useApi ? { ...t, ...updated } : withStatus({ ...t, ...updated })) : t)));
     }
   };
 
@@ -916,7 +942,7 @@ function WorkBoard({ viewer = { isAdmin: true, employeeId: null }, access = null
       .then(([emps, tks]) => {
         if (cancelled) return;
         setEmployees(emps);
-        setTasks(tks);
+        setRemote(tks);
         setLoad({ state: "ready" });
       })
       .catch((err) => {
@@ -1202,207 +1228,148 @@ function WorkBoard({ viewer = { isAdmin: true, employeeId: null }, access = null
 ------------------------------------------------------------------*/
 // isAdmin decides whether amounts and the money actions are shown. Staff see
 // only whether payment is received or pending.
-function ClientCard({ client, onCallLogged, onEdit, onPayment, onHistory, busy, isAdmin }) {
-  const meta = PAY_STATUS_META[client.status];
-  const pending = paymentPending(client);
+// One ticket in Receivables: its number, the work, how far the work is, and
+// how far the payment is. Amounts and the money buttons are the admin's.
+function ReceivableRow({ task, employees, isAdmin, busy, onAmount, onPayment, onPaid, onHistory, onReminder }) {
+  const pay = PAYMENT_META[task.paymentStatus];
+  const work = STATUS_META[task.status];
+  const assignee = employees.find((e) => e.id === task.assignee);
+  const due = balanceOf(task);
+  const owing = task.paymentStatus === "unpaid" || task.paymentStatus === "part";
+  const pill = "f-mono text-[10px] font-bold px-2 py-0.5 rounded uppercase tracking-wide whitespace-nowrap";
+  const outline = "f-body text-xs font-semibold px-3 py-1.5 rounded border bg-white flex items-center gap-1 shadow-sm hover:bg-stone-50 active:scale-95 transition-all";
+  const iconButton = "p-1.5 rounded hover:bg-stone-100 active:scale-95 transition-transform";
+
   return (
-    <div style={{ background: C.card, borderColor: C.line }} className="border rounded-md p-5 shadow-sm flex flex-col justify-between">
-      <div>
-        <div className="flex items-start justify-between mb-3 gap-2">
-          <div>
-            <h3 style={{ color: C.ink }} className="f-display text-base font-bold">{client.name}</h3>
-            <div style={{ color: C.steel }} className="f-body text-xs mt-0.5">{client.contact} &nbsp;•&nbsp; {client.phone}</div>
-          </div>
-          <div className="flex items-center gap-1 shrink-0">
-            <span style={{ background: meta.bg, color: meta.color }} className="f-mono text-[10px] font-bold px-2.5 py-1 rounded uppercase tracking-wide">
-              {meta.label}
-            </span>
-            {isAdmin && (<>
-            <button
-              onClick={() => onHistory(client)}
-              aria-label={`Payment history for ${client.name}`}
-              title="Payment history"
-              style={{ color: C.steel }}
-              className="p-1 rounded hover:bg-stone-100 active:scale-95 transition-transform"
-            >
-              <History size={13} />
-            </button>
-            <button
-              onClick={() => onEdit(client)}
-              aria-label={`Edit ${client.name}`}
-              style={{ color: C.steel }}
-              className="p-1 rounded hover:bg-stone-100 active:scale-95 transition-transform"
-            >
-              <Pencil size={13} />
-            </button>
-            </>)}
-          </div>
+    <li data-testid="receivable-row" data-task={task.id} style={{ borderColor: C.line }} className="border-t first:border-t-0 px-4 py-3.5 flex flex-col lg:flex-row lg:items-center gap-3">
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-2 flex-wrap mb-1">
+          <span style={{ color: C.steel }} className="f-mono text-xs font-semibold">{task.id}</span>
+          <span data-testid="pay-status" style={{ background: pay.bg, color: pay.color }} className={pill}>{PAYMENT_LABELS[task.paymentStatus]}</span>
+          <span data-testid="work-status" style={{ color: work.color, borderColor: C.line }} className={`${pill} border bg-white font-medium`}>Work: {work.label}</span>
         </div>
-
-        <div className="grid grid-cols-2 gap-3 mb-4">
-          <div style={{ background: C.paper }} className="rounded p-3 border border-stone-200/60">
-            <div style={{ color: C.steel }} className="f-mono text-[10px] uppercase tracking-wider mb-1">{isAdmin ? "Outstanding" : "Payment"}</div>
-            <div data-testid="client-amount" style={{ color: pending ? C.orangeDeep : C.green }} className="f-display text-lg font-bold">
-              {isAdmin ? (pending ? fmtINR(client.due) : "Settled") : (pending ? "Pending" : "Received")}
-            </div>
-          </div>
-          <div style={{ background: C.paper }} className="rounded p-3 border border-stone-200/60">
-            <div style={{ color: C.steel }} className="f-mono text-[10px] uppercase tracking-wider mb-1">Invoice Date</div>
-            <div style={{ color: C.ink }} className="f-body text-sm font-semibold">{fmtDate(client.invoiceDate)}</div>
-          </div>
+        <div style={{ color: C.ink }} className="f-display text-sm font-bold leading-snug">{task.title}</div>
+        <div style={{ color: C.steel }} className="f-body text-xs mt-0.5">
+          {task.client}{assignee ? ` · ${assignee.name}` : ""}
+          {owing && <> · <span data-testid="last-reminder">Reminder: {task.lastReminder ? daysAgo(task.lastReminder) : "none yet"}</span></>}
         </div>
       </div>
 
-      <div>
-        <div style={{ borderColor: C.line }} className="border-t pt-3 flex items-center justify-between flex-wrap gap-2">
-          <div style={{ color: C.steel }} className="f-body text-xs flex items-center gap-1.5">
-            <Clock size={13} style={{ color: C.blue }} /> Last contacted: <strong className="text-stone-700">{daysAgo(client.lastCall)}</strong>
-          </div>
-          {pending && (
-            <div className="flex items-center gap-2">
-              {isAdmin && <button
-                onClick={() => onPayment(client)}
-                style={{ borderColor: C.green, color: C.green }}
-                className="f-body text-xs font-semibold px-3 py-1.5 rounded border bg-white flex items-center gap-1 shadow-sm hover:bg-stone-50 active:scale-95 transition-all"
-              >
-                <IndianRupee size={12} /> Record Payment
-              </button>}
-              <button
-                onClick={() => onCallLogged(client.id)}
-                disabled={busy}
-                style={{ background: C.navy, color: C.paper }}
-                className="f-body text-xs font-semibold px-3 py-1.5 rounded flex items-center gap-1.5 shadow-sm hover:opacity-90 active:scale-95 transition-all disabled:opacity-50"
-              >
-                <PhoneCall size={13} /> Log Reminder
-              </button>
-            </div>
-          )}
+      {isAdmin && (
+        <div data-testid="pay-amount" className="lg:w-52 lg:text-right shrink-0">
+          {task.paymentStatus === "unset" ? (
+            <div style={{ color: C.steel }} className="f-body text-sm">No amount yet</div>
+          ) : task.fee === 0 ? (
+            <div style={{ color: C.steel }} className="f-body text-sm">No charge</div>
+          ) : (<>
+            <div style={{ color: C.ink }} className="f-body text-sm"><strong>{fmtINR(task.received ?? 0)}</strong> of {fmtINR(task.fee)} received</div>
+            <div style={{ color: due > 0 ? C.orangeDeep : C.green }} className="f-display text-sm font-bold">{due > 0 ? `${fmtINR(due)} due` : "Settled"}</div>
+          </>)}
         </div>
+      )}
 
-        {client.notes && (
-          <p style={{ color: C.steel, background: "#FAF8F5" }} className="f-body text-xs mt-3 p-2.5 rounded border border-stone-200/80 leading-relaxed italic">
-            "{client.notes}"
-          </p>
+      <div className="flex items-center gap-2 flex-wrap lg:justify-end shrink-0">
+        {isAdmin && task.paymentStatus === "unset" && (
+          <button onClick={() => onAmount(task)} style={{ borderColor: C.blue, color: C.blue }} className={outline}>
+            <IndianRupee size={12} /> Set amount
+          </button>
         )}
+        {isAdmin && owing && (<>
+          <button onClick={() => onPayment(task)} style={{ borderColor: C.line, color: C.ink }} className={outline}>
+            <IndianRupee size={12} /> Part payment
+          </button>
+          <button onClick={() => onPaid(task)} style={{ borderColor: C.green, color: C.green }} className={outline}>
+            <CircleCheck size={13} /> Mark as paid
+          </button>
+        </>)}
+        {owing && (
+          <button onClick={() => onReminder(task.id)} disabled={busy} style={{ background: C.navy, color: C.paper }} className="f-body text-xs font-semibold px-3 py-1.5 rounded flex items-center gap-1.5 shadow-sm hover:opacity-90 active:scale-95 transition-all disabled:opacity-50">
+            <PhoneCall size={13} /> Log reminder
+          </button>
+        )}
+        {isAdmin && task.paymentStatus !== "unset" && (<>
+          <button onClick={() => onHistory(task)} aria-label={`Payments on ${task.id}`} title="Payments received" style={{ color: C.steel }} className={iconButton}>
+            <History size={14} />
+          </button>
+          <button onClick={() => onAmount(task)} aria-label={`Change the amount for ${task.id}`} title="Change the amount to charge" style={{ color: C.steel }} className={iconButton}>
+            <Pencil size={14} />
+          </button>
+        </>)}
       </div>
-    </div>
+    </li>
   );
 }
 
-const EMPTY_CLIENT = { name: "", contact: "", phone: "", due: "", invoiceDate: "", status: "due-soon", notes: "" };
+// The line under a dialog's title saying which work it is about.
+function TicketLine({ task }) {
+  return (
+    <p style={{ color: C.steel }} className="f-body text-sm leading-snug">
+      <strong style={{ color: C.ink }}>{task.title}</strong><br />{task.client}
+    </p>
+  );
+}
 
-// Create (client = null) or edit a client. onSave and onDelete return promises.
-function ClientForm({ client, onSave, onDelete, onClose }) {
-  const [form, setForm] = useState(() => (
-    client
-      ? { ...EMPTY_CLIENT, ...Object.fromEntries(Object.keys(EMPTY_CLIENT).map((k) => [k, client[k] ?? ""])), due: String(client.due) }
-      : { ...EMPTY_CLIENT, invoiceDate: localDay() }
-  ));
+// Set or change the amount to charge for a ticket. onSave returns a promise.
+function AmountForm({ task, onSave, onClose }) {
+  const [value, setValue] = useState(task.fee === null || task.fee === undefined ? "" : String(task.fee));
   const { busy, error, setError, run } = useDialogAction(onClose);
-  const set = (key) => (e) => setForm((f) => ({ ...f, [key]: e.target.value }));
+  const received = task.received ?? 0;
 
   const submit = (e) => {
     e.preventDefault();
-    const problem = clientFormError(form);
-    if (problem) { setError(problem); return; }
-    run(() => onSave(form));
+    const parsed = parseFee(value, received);
+    if (parsed.error) { setError(parsed.error); return; }
+    run(() => onSave(task, parsed.fee));
   };
 
-  const line = { borderColor: C.line, color: C.ink };
-  const settled = parseRupees(form.due) === 0;
-
   return (
-    <Modal
-      label={client ? `Edit ${client.name}` : "New client"}
-      kicker={client ? "Receivable" : "New Receivable"}
-      title={client ? "Edit Client" : "Add Client"}
-      busy={busy}
-      onClose={onClose}
-      onSubmit={submit}
-      footer={<>
-        <div>
-          {client && <DeleteControl question="Delete this client permanently?" busy={busy} onConfirm={() => run(() => onDelete(client.id))} />}
-        </div>
-        <DialogButtons busy={busy} onClose={onClose} saveLabel={client ? "Save Changes" : "Add Client"} />
-      </>}
-    >
-      <div className="p-5 grid grid-cols-1 sm:grid-cols-2 gap-4">
-        <div className="sm:col-span-2">
-          <Field label="Client name" required>
-            <input name="name" value={form.name} onChange={set("name")} required autoFocus style={line} className={INPUT_CLASS} />
-          </Field>
-        </div>
-        <Field label="Contact person" required>
-          <input name="contact" value={form.contact} onChange={set("contact")} required style={line} className={INPUT_CLASS} />
+    <Modal label={`Amount to charge for ${task.id}`} kicker={task.id} title="Amount to charge" busy={busy} onClose={onClose} onSubmit={submit} width="max-w-md" footer={<DialogButtons busy={busy} onClose={onClose} saveLabel="Save Amount" />}>
+      <div className="p-5 grid grid-cols-1 gap-4">
+        <TicketLine task={task} />
+        <Field label="Amount to charge (₹)">
+          <input name="fee" inputMode="numeric" value={value} onChange={(e) => setValue(e.target.value)} autoFocus style={{ borderColor: C.line, color: C.ink }} className={INPUT_CLASS} />
         </Field>
-        <Field label="Phone" required>
-          <input name="phone" type="tel" value={form.phone} onChange={set("phone")} required style={line} className={INPUT_CLASS} placeholder="+91" />
-        </Field>
-        <Field label="Outstanding amount (₹)" required>
-          <input name="due" inputMode="numeric" value={form.due} onChange={set("due")} required style={line} className={INPUT_CLASS} placeholder="0" />
-        </Field>
-        <Field label="Invoice date" required>
-          <input name="invoiceDate" type="date" value={form.invoiceDate} onChange={set("invoiceDate")} required style={line} className={INPUT_CLASS} />
-        </Field>
-        <div className="sm:col-span-2">
-          <Field label="Status" required>
-            <select name="status" value={settled ? "paid" : form.status} onChange={set("status")} disabled={settled} style={line} className={INPUT_CLASS}>
-              {["overdue", "due-soon", "paid"].map((st) => <option key={st} value={st}>{PAY_STATUS_META[st].label}</option>)}
-            </select>
-          </Field>
-          {settled && <p style={{ color: C.steel }} className="f-body text-xs mt-1">Nothing outstanding, so this client is marked as paid.</p>}
-        </div>
-        <div className="sm:col-span-2">
-          <Field label="Notes">
-            <textarea name="notes" value={form.notes} onChange={set("notes")} rows={3} style={line} className={INPUT_CLASS} />
-          </Field>
-        </div>
+        <p style={{ color: C.steel }} className="f-body text-xs -mt-2">
+          {received > 0
+            ? `${fmtINR(received)} has been received, so the amount cannot be less than that.`
+            : "Leave blank if it is not decided yet. Enter 0 for work that is not charged."}
+        </p>
         <DialogError error={error} />
       </div>
     </Modal>
   );
 }
 
-// Record an amount received from a client. onSave returns a promise.
-function PaymentForm({ client, onSave, onClose }) {
+// Record part of what is owed. onSave returns a promise.
+function PaymentForm({ task, onSave, onClose }) {
   const [amount, setAmount] = useState("");
   const [note, setNote] = useState("");
   const { busy, error, setError, run } = useDialogAction(onClose);
+  const due = balanceOf(task);
   const paid = parseRupees(amount);
-  const remaining = Number.isNaN(paid) || paid > client.due ? null : client.due - paid;
+  const remaining = Number.isNaN(paid) || paid > due ? null : due - paid;
 
   const submit = (e) => {
     e.preventDefault();
-    const problem = paymentError(client, amount);
+    const problem = paymentError(task, amount);
     if (problem) { setError(problem); return; }
-    run(() => onSave(client, amount, note));
+    run(() => onSave(task, amount, note));
   };
 
   return (
-    <Modal
-      label={`Record payment from ${client.name}`}
-      kicker="Payment Received"
-      title={client.name}
-      busy={busy}
-      onClose={onClose}
-      onSubmit={submit}
-      width="max-w-md"
-      footer={<DialogButtons busy={busy} onClose={onClose} saveLabel="Record Payment" />}
-    >
+    <Modal label={`Record a payment on ${task.id}`} kicker={task.id} title="Payment received" busy={busy} onClose={onClose} onSubmit={submit} width="max-w-md" footer={<DialogButtons busy={busy} onClose={onClose} saveLabel="Record Payment" />}>
       <div className="p-5 grid grid-cols-1 gap-4">
+        <TicketLine task={task} />
         <div style={{ background: C.card, borderColor: C.line }} className="border rounded p-3 flex items-center justify-between">
-          <span style={{ color: C.steel }} className="f-mono text-[10px] uppercase tracking-wider">Outstanding</span>
-          <span style={{ color: C.orangeDeep }} className="f-display text-lg font-bold">{fmtINR(client.due)}</span>
+          <span style={{ color: C.steel }} className="f-mono text-[10px] uppercase tracking-wider">Balance due</span>
+          <span style={{ color: C.orangeDeep }} className="f-display text-lg font-bold">{fmtINR(due)}</span>
         </div>
         <Field label="Amount received (₹)" required>
           <input name="amount" inputMode="numeric" value={amount} onChange={(e) => setAmount(e.target.value)} required autoFocus style={{ borderColor: C.line, color: C.ink }} className={INPUT_CLASS} />
         </Field>
-        <button type="button" onClick={() => setAmount(String(client.due))} style={{ color: C.blue }} className="f-body text-xs font-semibold text-left -mt-2">
-          Paid in full ({fmtINR(client.due)})
-        </button>
         {remaining !== null && paid > 0 && (
-          <p data-testid="remaining" style={{ color: remaining === 0 ? C.green : C.steel }} className="f-body text-sm">
-            {remaining === 0 ? "This clears the account. It will be marked as paid." : `${fmtINR(remaining)} will remain outstanding.`}
+          <p data-testid="remaining" style={{ color: remaining === 0 ? C.green : C.steel }} className="f-body text-sm -mt-2">
+            {remaining === 0 ? "This settles the ticket. It will show as Paid." : `${fmtINR(remaining)} will still be due. The ticket will show as Part paid.`}
           </p>
         )}
         <Field label="Note">
@@ -1414,10 +1381,43 @@ function PaymentForm({ client, onSave, onClose }) {
   );
 }
 
-// The payments received from one client, newest first. load returns a promise
-// of the list.
-function PaymentHistory({ client, load, onClose }) {
+// "Are you sure?" before a ticket is marked as paid in full. onConfirm
+// returns a promise.
+function ConfirmPaid({ task, onConfirm, onClose }) {
+  const { busy, error, run } = useDialogAction(onClose);
+  const due = balanceOf(task);
+  const received = task.received ?? 0;
+  return (
+    <Modal
+      label={`Mark ${task.id} as paid`}
+      kicker={task.id}
+      title="Mark as paid?"
+      busy={busy}
+      onClose={onClose}
+      onSubmit={(e) => { e.preventDefault(); run(() => onConfirm(task)); }}
+      width="max-w-md"
+      footer={<DialogButtons busy={busy} onClose={onClose} saveLabel="Yes, mark as paid" />}
+    >
+      <div data-testid="confirm-paid" className="p-5 grid grid-cols-1 gap-3">
+        <TicketLine task={task} />
+        <p style={{ color: C.ink }} className="f-body text-sm leading-relaxed">
+          This records <strong>{fmtINR(due)}</strong> received today{received > 0 ? `, on top of the ${fmtINR(received)} received earlier` : ""}. The ticket will show as <strong>Paid</strong>.
+        </p>
+        <p style={{ color: C.steel }} className="f-body text-xs">If this was a mistake, the payment can be removed from the ticket&rsquo;s payment list.</p>
+        <DialogError error={error} />
+      </div>
+    </Modal>
+  );
+}
+
+// The payments received on one ticket, newest first. load returns a promise
+// of the list; onRemove takes one back and returns a promise.
+function PaymentHistory({ task, load, onRemove, onClose }) {
   const [state, setState] = useState({ status: "loading" });
+  // The payment being asked about, and the one being removed.
+  const [asking, setAsking] = useState(null);
+  const [removing, setRemoving] = useState(null);
+  const [error, setError] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -1427,119 +1427,113 @@ function PaymentHistory({ client, load, onClose }) {
     return () => { cancelled = true; };
   }, [load]);
 
-  const total = state.status === "ready" ? state.payments.reduce((sum, p) => sum + p.amount, 0) : 0;
+  const remove = (payment) => {
+    setRemoving(payment.id);
+    setError(null);
+    onRemove(task, payment.id)
+      .then(() => setState((s) => ({ ...s, payments: s.payments.filter((p) => p.id !== payment.id) })))
+      .catch((err) => setError(`Could not remove the payment. ${err.message}`))
+      .finally(() => { setRemoving(null); setAsking(null); });
+  };
+
+  const due = balanceOf(task);
+  const small = "f-body text-xs px-2.5 py-1 rounded";
 
   return (
     <Modal
-      label={`Payment history for ${client.name}`}
-      kicker="Payment History"
-      title={client.name}
+      label={`Payments on ${task.id}`}
+      kicker={task.id}
+      title="Payments received"
+      busy={removing !== null}
       onClose={onClose}
       onSubmit={(e) => { e.preventDefault(); onClose(); }}
       width="max-w-md"
-      footer={
-        <button type="submit" style={{ borderColor: C.line, color: C.ink }} className="f-body text-sm px-4 py-2 rounded border bg-white ml-auto">
-          Close
-        </button>
-      }
+      footer={<button type="submit" disabled={removing !== null} style={{ borderColor: C.line, color: C.ink }} className="f-body text-sm px-4 py-2 rounded border bg-white ml-auto">Close</button>}
     >
-      <div className="p-5">
-        {state.status === "loading" && <p style={{ color: C.steel }} className="f-body text-sm text-center py-6">Loading payments…</p>}
+      <div className="p-5 grid grid-cols-1 gap-3">
+        <TicketLine task={task} />
+        <div style={{ background: C.card, borderColor: C.line }} className="border rounded p-3 grid grid-cols-3 gap-2 text-center">
+          {[
+            ["To charge", fmtINR(task.fee ?? 0), C.ink, "history-fee"],
+            ["Received", fmtINR(task.received ?? 0), C.green, "total-received"],
+            ["Due", due > 0 ? fmtINR(due) : "Nothing", due > 0 ? C.orangeDeep : C.green, "history-due"],
+          ].map(([label, value, color, testId]) => (
+            <div key={label}>
+              <div style={{ color: C.steel }} className="f-mono text-[10px] uppercase tracking-wider">{label}</div>
+              <div data-testid={testId} style={{ color }} className="f-display text-base font-bold">{value}</div>
+            </div>
+          ))}
+        </div>
+        {state.status === "loading" && <p style={{ color: C.steel }} className="f-body text-sm text-center py-4">Loading payments…</p>}
         {state.status === "error" && <DialogError error={`Could not load the payments. ${state.message}`} />}
         {state.status === "ready" && state.payments.length === 0 && (
-          <p style={{ color: C.steel }} className="f-body text-sm text-center py-6">No payments recorded yet.</p>
+          <p style={{ color: C.steel }} className="f-body text-sm text-center py-4">No payments recorded yet.</p>
         )}
         {state.status === "ready" && state.payments.length > 0 && (
-          <>
-            <div style={{ background: C.card, borderColor: C.line }} className="border rounded p-3 flex items-center justify-between mb-3">
-              <span style={{ color: C.steel }} className="f-mono text-[10px] uppercase tracking-wider">Total received</span>
-              <span data-testid="total-received" style={{ color: C.green }} className="f-display text-lg font-bold">{fmtINR(total)}</span>
-            </div>
-            <ul style={{ borderColor: C.line }} className="border rounded divide-y divide-stone-200 bg-white">
-              {state.payments.map((p) => (
-                <li key={p.id} data-testid="payment-row" className="px-3 py-2.5 flex items-start justify-between gap-3">
+          <ul style={{ borderColor: C.line }} className="border rounded divide-y divide-stone-200 bg-white">
+            {state.payments.map((p) => (
+              <li key={p.id} data-testid="payment-row" className="px-3 py-2.5">
+                <div className="flex items-start justify-between gap-3">
                   <div>
                     <div style={{ color: C.ink }} className="f-body text-sm font-semibold">{fmtDate(p.receivedAt)}</div>
                     {p.note && <div style={{ color: C.steel }} className="f-body text-xs mt-0.5">{p.note}</div>}
                   </div>
-                  <div style={{ color: C.green }} className="f-display text-sm font-bold shrink-0">{fmtINR(p.amount)}</div>
-                </li>
-              ))}
-            </ul>
-          </>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <span style={{ color: C.green }} className="f-display text-sm font-bold">{fmtINR(p.amount)}</span>
+                    {asking !== p.id && (
+                      <button type="button" onClick={() => setAsking(p.id)} disabled={removing !== null} aria-label={`Remove the payment of ${fmtINR(p.amount)}`} title="Remove this payment" style={{ color: C.steel }} className="p-1 rounded hover:bg-stone-100">
+                        <Trash2 size={13} />
+                      </button>
+                    )}
+                  </div>
+                </div>
+                {asking === p.id && (
+                  <div className="flex items-center gap-2 flex-wrap mt-2">
+                    <span style={{ color: C.orangeDeep }} className="f-body text-xs font-semibold">Remove this payment? {fmtINR(p.amount)} will be due again.</span>
+                    <button type="button" onClick={() => remove(p)} disabled={removing !== null} style={{ background: C.orangeDeep, color: C.paper }} className={`${small} font-semibold`}>
+                      {removing === p.id ? "Removing…" : "Yes, remove"}
+                    </button>
+                    <button type="button" onClick={() => setAsking(null)} disabled={removing !== null} style={{ borderColor: C.line, color: C.ink }} className={`${small} border bg-white`}>No</button>
+                  </div>
+                )}
+              </li>
+            ))}
+          </ul>
         )}
-        <p style={{ color: C.steel }} className="f-body text-xs mt-3">
-          Still outstanding: <strong>{client.due > 0 ? fmtINR(client.due) : "nothing"}</strong>
-        </p>
+        <DialogError error={error} />
       </div>
     </Modal>
   );
 }
 
-function Payments({ isAdmin }) {
+// Receivables, ticket by ticket. Every ticket on the Work Board is listed
+// here, so the two never disagree. local and setLocal are the mock-mode tasks
+// shared with the Work Board.
+function Payments({ isAdmin, local, setLocal }) {
   const useApi = hasApi();
-  const [clients, setClients] = useState(useApi ? [] : INITIAL_CLIENTS);
+  const [remote, setRemote] = useState([]);
+  const [employees, setEmployees] = useState(useApi ? [] : EMPLOYEES);
   const [load, setLoad] = useState(useApi ? { state: "loading" } : { state: "ready" });
   const [attempt, setAttempt] = useState(0);
   const [saveError, setSaveError] = useState(null);
   const [saving, setSaving] = useState(() => new Set());
-  const [filter, setFilter] = useState("all");
+  const [filter, setFilter] = useState("pending");
+  const [query, setQuery] = useState("");
+  // { kind: "amount" | "payment" | "paid" | "history", id }, or null.
+  const [dialog, setDialog] = useState(null);
+  const tasks = useApi ? remote : local;
+  const setTasks = useApi ? setRemote : setLocal;
   // The viewer's own calendar day, so "Today" is right before 05:30 IST too.
   const today = localDay();
-  // null = closed, "new" = adding, a client = editing it.
-  const [editing, setEditing] = useState(null);
-  const [paying, setPaying] = useState(null);
-  const [history, setHistory] = useState(null);
-  // Mock mode only: payments recorded in this browser, newest first, by client id.
-  const [localPayments, setLocalPayments] = useState({});
-
-  const replaceClient = (id, changes) => setClients((prev) => prev.map((c) => (c.id === id ? { ...c, ...changes } : c)));
-
-  // These return promises so the dialogs can show a failure and stay open.
-  const saveClient = async (form) => {
-    if (editing === "new") {
-      const created = useApi
-        ? await createClient(form)
-        : { ...clientToApi(form), id: nextLocalClientId(clients), lastCall: today };
-      setClients((prev) => [...prev, created]);
-    } else {
-      const id = editing.id;
-      replaceClient(id, useApi ? await updateClient(id, form) : clientToApi(form));
-    }
-  };
-
-  const removeClient = async (id) => {
-    if (useApi) await deleteClient(id);
-    setClients((prev) => prev.filter((c) => c.id !== id));
-  };
-
-  const savePayment = async (client, amount, note) => {
-    if (useApi) {
-      replaceClient(client.id, (await recordPayment(client, amount, note)).client);
-      return;
-    }
-    replaceClient(client.id, paymentPatchBody(client, amount));
-    setLocalPayments((prev) => {
-      const earlier = prev[client.id] ?? [];
-      const payment = { id: earlier.length + 1, clientId: client.id, amount: parseRupees(amount), note: note.trim() || null, receivedAt: today };
-      return { ...prev, [client.id]: [payment, ...earlier] };
-    });
-  };
-
-  // Stable while the dialog is open, so it loads once.
-  const historyId = history?.id;
-  const loadHistory = useMemo(
-    () => () => (useApi ? fetchPayments(historyId) : Promise.resolve(localPayments[historyId] ?? [])),
-    [useApi, historyId, localPayments]
-  );
 
   useEffect(() => {
     if (!useApi) return undefined;
     let cancelled = false;
-    fetchClients()
-      .then((list) => {
+    Promise.all([fetchEmployees(), fetchTasks()])
+      .then(([people, list]) => {
         if (cancelled) return;
-        setClients(list);
+        setEmployees(people);
+        setRemote(list);
         setLoad({ state: "ready" });
       })
       .catch((err) => {
@@ -1553,51 +1547,68 @@ function Payments({ isAdmin }) {
     setAttempt((a) => a + 1);
   };
 
-  const setLastCall = (id, lastCall) => setClients((prev) => prev.map((c) => (c.id === id ? { ...c, lastCall } : c)));
+  const replaceTask = (task) => setTasks((prev) => prev.map((t) => (t.id === task.id ? { ...t, ...task } : t)));
 
-  // One save per client at a time, so a failed save always restores a date the
+  // These return promises so the dialogs can show a failure and stay open.
+  const saveFee = async (task, fee) => replaceTask(useApi ? await setTaskFee(task.id, fee) : withStatus({ ...task, fee }));
+  const savePayment = async (task, amount, note) => {
+    if (useApi) {
+      replaceTask((await recordPayment(task.id, amount, note)).task);
+      return;
+    }
+    const earlier = task.payments ?? [];
+    replaceTask(applyPayment(task, { id: Math.max(0, ...earlier.map((p) => p.id)) + 1, amount: parseRupees(amount), note: note.trim() || null, receivedAt: today }));
+  };
+  const markPaid = (task) => savePayment(task, String(balanceOf(task)), "");
+  const takeBack = async (task, paymentId) => replaceTask(useApi ? await removePayment(task.id, paymentId) : removeLocalPayment(task, paymentId));
+
+  const open = dialog ? tasks.find((t) => t.id === dialog.id) : null;
+  // Stable while the dialog is open, so it loads once. In mock mode the list
+  // is read when the dialog opens; the dialog then keeps its own copy.
+  const historyId = dialog?.kind === "history" ? dialog.id : null;
+  const loadHistory = useMemo(
+    () => () => (useApi ? fetchPayments(historyId) : Promise.resolve(local.find((t) => t.id === historyId)?.payments ?? [])),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [useApi, historyId]
+  );
+
+  const setReminder = (id, lastReminder) => setTasks((prev) => prev.map((t) => (t.id === id ? { ...t, lastReminder } : t)));
+
+  // One save per ticket at a time, so a failed save always restores a date the
   // server really had.
-  const logCall = (id) => {
-    const client = clients.find((c) => c.id === id);
-    if (!client || saving.has(id)) return;
-    const prevLastCall = client.lastCall;
+  const remind = (id) => {
+    const task = tasks.find((t) => t.id === id);
+    if (!task || saving.has(id)) return;
+    const previous = task.lastReminder ?? null;
     setSaveError(null);
-    setLastCall(id, today);
+    setReminder(id, today);
     if (!useApi) return;
     setSaving((prev) => new Set(prev).add(id));
-    logClientCall(id)
-      .then((updated) => setLastCall(id, updated.lastCall))
+    logReminder(id)
+      .then((updated) => setReminder(id, updated.lastReminder))
       .catch((err) => {
-        setLastCall(id, prevLastCall);
-        setSaveError(`Could not save the reminder for ${client.name}; it was undone. ${err.message}`);
+        setReminder(id, previous);
+        setSaveError(`Could not save the reminder for ${id}; it was undone. ${err.message}`);
       })
       .finally(() => setSaving((prev) => { const next = new Set(prev); next.delete(id); return next; }));
   };
 
-  const totalDue = isAdmin ? clients.reduce((s, c) => s + c.due, 0) : 0;
-  const pendingCount = clients.filter(paymentPending).length;
-  const overdueCount = clients.filter((c) => c.status === "overdue").length;
-  const calledToday = clients.filter((c) => c.lastCall === today).length;
-
-  const visible = filter === "all" ? clients : clients.filter((c) => c.status === filter);
+  const counts = receivableCounts(tasks);
+  const totals = receivableTotals(tasks);
+  const visible = useMemo(() => sortReceivables(filterReceivables(filterTasks(tasks, query), filter)), [tasks, query, filter]);
+  const tile = "border rounded-md p-4 sm:p-5 shadow-sm";
+  const tileLabel = "f-mono text-[11px] uppercase tracking-wider mb-1";
+  const tileValue = "f-display text-xl sm:text-2xl font-bold";
 
   return (
     <div style={{ background: C.paper }} className="min-h-[calc(100vh-4rem)] grid-bg py-6 sm:py-10">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <div className="mb-6 flex items-end justify-between gap-4 flex-wrap">
-          <div>
-            <div style={{ color: C.orangeDeep }} className="f-mono text-xs font-semibold tracking-wider uppercase mb-1">Financial Log</div>
-            <h1 style={{ color: C.ink }} className="f-display text-2xl sm:text-3xl font-bold">Payment Receivables &amp; Follow-ups</h1>
-          </div>
-          {load.state === "ready" && isAdmin && (
-            <button
-              onClick={() => setEditing("new")}
-              style={{ background: C.orange, color: C.paper }}
-              className="f-body text-sm font-semibold px-4 py-2 rounded shadow-sm hover:opacity-90 active:scale-95 transition-all inline-flex items-center gap-1.5"
-            >
-              <Plus size={16} /> Add Client
-            </button>
-          )}
+        <div className="mb-6">
+          <div style={{ color: C.orangeDeep }} className="f-mono text-xs font-semibold tracking-wider uppercase mb-1">Receivables</div>
+          <h1 style={{ color: C.ink }} className="f-display text-2xl sm:text-3xl font-bold">Payments by ticket</h1>
+          <p style={{ color: C.steel }} className="f-body text-sm mt-1 max-w-2xl">
+            Every ticket on the Work Board is listed here with its payment. {isAdmin ? "Set the amount to charge, then record what comes in, in part or in full." : "Amounts are shown to the admin only."}
+          </p>
         </div>
 
         {load.state === "loading" && (
@@ -1609,84 +1620,97 @@ function Payments({ isAdmin }) {
         {load.state === "error" && (
           <div style={{ borderColor: C.orangeDeep, background: "#FDF0EA" }} className="border rounded-md p-6 text-center">
             <p style={{ color: C.orangeDeep }} className="f-body text-sm mb-3">Could not load payments. {load.message}</p>
-            <button
-              onClick={retry}
-              style={{ background: C.navy, color: C.paper }}
-              className="f-body text-xs font-semibold px-4 py-2 rounded shadow-sm hover:opacity-90"
-            >
+            <button onClick={retry} style={{ background: C.navy, color: C.paper }} className="f-body text-xs font-semibold px-4 py-2 rounded shadow-sm hover:opacity-90">
               Retry
             </button>
           </div>
         )}
 
         {load.state === "ready" && (<>
-        {saveError && (
-          <div role="alert" style={{ borderColor: C.orangeDeep, background: "#FDF0EA", color: C.orangeDeep }} className="border rounded-md px-4 py-3 mb-4 f-body text-sm flex items-start justify-between gap-3">
-            <span>{saveError}</span>
-            <button onClick={() => setSaveError(null)} aria-label="Dismiss" className="shrink-0"><X size={16} /></button>
-          </div>
-        )}
+          {saveError && (
+            <div role="alert" style={{ borderColor: C.orangeDeep, background: "#FDF0EA", color: C.orangeDeep }} className="border rounded-md px-4 py-3 mb-4 f-body text-sm flex items-start justify-between gap-3">
+              <span>{saveError}</span>
+              <button onClick={() => setSaveError(null)} aria-label="Dismiss" className="shrink-0"><X size={16} /></button>
+            </div>
+          )}
 
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-8">
-          <div style={{ background: C.navy }} className="rounded-md p-5 shadow-sm text-white">
-            <div style={{ color: C.blueLight }} className="f-mono text-xs uppercase tracking-wider mb-1">{isAdmin ? "Total Outstanding" : "Payments Pending"}</div>
-            <div data-testid="total-tile" className="f-display text-2xl sm:text-3xl font-bold">
-              {isAdmin ? fmtINR(totalDue) : <>{pendingCount} <span className="text-sm font-normal opacity-70">of {clients.length} clients</span></>}
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4 mb-6">
+            <div style={{ background: C.navy, borderColor: C.navy }} className={`${tile} text-white`}>
+              <div style={{ color: C.blueLight }} className={tileLabel}>{isAdmin ? "Total due" : "Payment pending"}</div>
+              <div data-testid="total-tile" className={tileValue}>
+                {isAdmin ? fmtINR(totals.outstanding) : <>{counts.unpaid + counts.part} <span className="text-sm font-normal opacity-70">of {counts.all} tickets</span></>}
+              </div>
+            </div>
+            <div style={{ background: C.card, borderColor: C.line }} className={tile}>
+              <div style={{ color: C.steel }} className={tileLabel}>{isAdmin ? "Received so far" : "Paid"}</div>
+              <div data-testid="received-tile" style={{ color: C.green }} className={tileValue}>{isAdmin ? fmtINR(totals.received) : counts.paid}</div>
+            </div>
+            <div style={{ background: C.card, borderColor: C.line }} className={tile}>
+              <div style={{ color: C.steel }} className={tileLabel}>Part paid</div>
+              <div data-testid="part-tile" style={{ color: C.blue }} className={tileValue}>{counts.part}</div>
+            </div>
+            <div style={{ background: C.card, borderColor: C.line }} className={tile}>
+              <div style={{ color: C.steel }} className={tileLabel}>Amount not set</div>
+              <div data-testid="unset-tile" style={{ color: counts.unset > 0 ? C.orangeDeep : C.steel }} className={tileValue}>{counts.unset}</div>
             </div>
           </div>
-          <div style={{ background: C.card, borderColor: C.line }} className="border rounded-md p-5 shadow-sm">
-            <div style={{ color: C.steel }} className="f-mono text-xs uppercase tracking-wider mb-1">Overdue Accounts</div>
-            <div style={{ color: C.orangeDeep }} className="f-display text-2xl sm:text-3xl font-bold">{overdueCount}</div>
+
+          <div className="relative mb-3 max-w-md">
+            <Search size={15} style={{ color: C.steel }} className="absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+            <input
+              type="search"
+              aria-label="Search tickets"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search by NK number, work or customer"
+              style={{ borderColor: C.line, color: C.ink }}
+              className={`${INPUT_CLASS} pl-9`}
+            />
           </div>
-          <div style={{ background: C.card, borderColor: C.line }} className="border rounded-md p-5 shadow-sm">
-            <div style={{ color: C.steel }} className="f-mono text-xs uppercase tracking-wider mb-1">Followed Up Today</div>
-            <div style={{ color: C.green }} className="f-display text-2xl sm:text-3xl font-bold">
-              {calledToday} <span className="text-sm font-normal text-stone-500">/ {pendingCount} pending</span>
+
+          <div className="flex items-center gap-2 mb-5 overflow-x-auto pb-2 no-scrollbar">
+            {RECEIVABLE_FILTERS.map((f) => (
+              <button
+                key={f.id}
+                onClick={() => setFilter(f.id)}
+                aria-pressed={filter === f.id}
+                style={{ background: filter === f.id ? C.navy : C.card, color: filter === f.id ? C.paper : C.ink, borderColor: C.line }}
+                className="f-body text-xs px-4 py-2 rounded border font-medium whitespace-nowrap shadow-sm shrink-0"
+              >
+                {f.label} ({counts[f.id]})
+              </button>
+            ))}
+          </div>
+
+          {visible.length === 0 ? (
+            <div data-testid="receivables-empty" style={{ borderColor: C.line, color: C.steel, background: C.card }} className="border border-dashed rounded-md p-10 text-center f-body text-sm">
+              {tasks.length === 0 ? "No tickets yet. Work added on the Work Board appears here." : "No tickets in this list."}
             </div>
-          </div>
-        </div>
-
-        <div className="flex items-center gap-2 mb-6 overflow-x-auto pb-2 no-scrollbar">
-          {[
-            { id: "all", label: "All Accounts" },
-            { id: "overdue", label: "Overdue" },
-            { id: "due-soon", label: "Due Soon" },
-            { id: "paid", label: "Fully Paid" },
-          ].map((f) => (
-            <button
-              key={f.id}
-              onClick={() => setFilter(f.id)}
-              style={{
-                background: filter === f.id ? C.navy : C.card,
-                color: filter === f.id ? C.paper : C.ink,
-                borderColor: C.line,
-              }}
-              className="f-body text-xs px-4 py-2 rounded border font-medium whitespace-nowrap shadow-sm shrink-0"
-            >
-              {f.label}
-            </button>
-          ))}
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
-          {visible.map((c) => (
-            <ClientCard key={c.id} client={c} onCallLogged={logCall} onEdit={setEditing} onPayment={setPaying} onHistory={setHistory} busy={saving.has(c.id)} isAdmin={isAdmin} />
-          ))}
-        </div>
+          ) : (
+            <ul style={{ borderColor: C.line, background: C.card }} className="border rounded-md shadow-sm overflow-hidden">
+              {visible.map((t) => (
+                <ReceivableRow
+                  key={t.id}
+                  task={t}
+                  employees={employees}
+                  isAdmin={isAdmin}
+                  busy={saving.has(t.id)}
+                  onAmount={(task) => setDialog({ kind: "amount", id: task.id })}
+                  onPayment={(task) => setDialog({ kind: "payment", id: task.id })}
+                  onPaid={(task) => setDialog({ kind: "paid", id: task.id })}
+                  onHistory={(task) => setDialog({ kind: "history", id: task.id })}
+                  onReminder={remind}
+                />
+              ))}
+            </ul>
+          )}
         </>)}
       </div>
 
-      {editing && (
-        <ClientForm
-          key={editing === "new" ? "new" : editing.id}
-          client={editing === "new" ? null : editing}
-          onSave={saveClient}
-          onDelete={removeClient}
-          onClose={() => setEditing(null)}
-        />
-      )}
-      {paying && <PaymentForm key={paying.id} client={paying} onSave={savePayment} onClose={() => setPaying(null)} />}
-      {history && <PaymentHistory key={history.id} client={clients.find((c) => c.id === history.id) ?? history} load={loadHistory} onClose={() => setHistory(null)} />}
+      {open && dialog.kind === "amount" && <AmountForm key={open.id} task={open} onSave={saveFee} onClose={() => setDialog(null)} />}
+      {open && dialog.kind === "payment" && <PaymentForm key={open.id} task={open} onSave={savePayment} onClose={() => setDialog(null)} />}
+      {open && dialog.kind === "paid" && <ConfirmPaid key={open.id} task={open} onConfirm={markPaid} onClose={() => setDialog(null)} />}
+      {open && dialog.kind === "history" && <PaymentHistory key={open.id} task={open} load={loadHistory} onRemove={takeBack} onClose={() => setDialog(null)} />}
     </div>
   );
 }
@@ -2423,6 +2447,9 @@ export default function App() {
   // Mock mode only: enquiries live here so the landing page form and the
   // Enquiries page share one list.
   const [localEnquiries, setLocalEnquiries] = useState(INITIAL_ENQUIRIES);
+  // Mock mode only: the tickets live here so the Work Board and Receivables
+  // always show the same ones.
+  const [localTasks, setLocalTasks] = useState(INITIAL_TASKS);
   const sendLocalEnquiry = async (form) => {
     setLocalEnquiries((prev) => [
       { id: Math.max(0, ...prev.map((e) => e.id)) + 1, name: form.name.trim(), phone: form.phone.trim(), message: form.message.trim() || null, status: "new", createdAt: localDay() },
@@ -2449,10 +2476,12 @@ export default function App() {
               access={access}
               view={page === "completed" ? "completed" : "board"}
               onView={(next) => setPage(next === "completed" ? "completed" : "work")}
+              local={localTasks}
+              setLocal={setLocalTasks}
             />
           </StaffOnly>
         )}
-        {page === "payments" && <StaffOnly staff={staff}><Payments key={staff.session.role} isAdmin={staff.isAdmin} /></StaffOnly>}
+        {page === "payments" && <StaffOnly staff={staff}><Payments key={staff.session.role} isAdmin={staff.isAdmin} local={localTasks} setLocal={setLocalTasks} /></StaffOnly>}
         {page === "team" && <StaffOnly staff={staff}><Team key={`${staff.session.role}-${staff.session.employeeId}`} viewer={staff.viewer} access={access} /></StaffOnly>}
         {page === "activity" && (
           <StaffOnly staff={staff}>

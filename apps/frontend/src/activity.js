@@ -8,13 +8,13 @@
 export const KIND_FILTERS = [
   { id: "", label: "Everything" },
   { id: "task", label: "Work" },
-  { id: "client", label: "Clients" },
   { id: "payment", label: "Payments" },
   { id: "enquiry", label: "Enquiries" },
   { id: "employee", label: "Passwords" },
   { id: "session", label: "Sign-ins" },
 ];
 
+// "client" is for entries from before receivables moved onto tickets.
 const KIND_LABELS = { task: "Work", client: "Client", payment: "Payment", enquiry: "Enquiry", employee: "Password", session: "Sign-in" };
 
 // The short tag on an entry: "Work" for "task.moved".
@@ -96,6 +96,9 @@ const FIELD_LABELS = {
   expectedCompletion: "Expected completion",
   createdAt: "Created",
   completedAt: "Completed",
+  fee: "Amount to charge",
+  received: "Total received",
+  lastReminder: "Last reminder call",
   name: "Name",
   contact: "Contact person",
   phone: "Phone",
@@ -121,11 +124,11 @@ const VALUE_LABELS = {
   priority: { low: "Low", medium: "Medium", high: "High" },
 };
 
-const MONEY_FIELDS = new Set(["due", "amount"]);
+const MONEY_FIELDS = new Set(["due", "amount", "fee", "received"]);
 // A calendar date with no time, stored as midnight UTC and read by its UTC day.
 const DAY_FIELDS = new Set(["invoiceDate", "expectedCompletion"]);
 // A moment in time, shown in the viewer's time zone.
-const INSTANT_FIELDS = new Set(["createdAt", "completedAt", "lastCall", "receivedAt"]);
+const INSTANT_FIELDS = new Set(["createdAt", "completedAt", "lastCall", "lastReminder", "receivedAt"]);
 
 export const rupees = (n) => `₹${Number(n).toLocaleString("en-IN")}`;
 const NOTHING = "—";

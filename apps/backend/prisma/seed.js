@@ -2,8 +2,8 @@ import { PrismaClient } from "@prisma/client";
 
 const prisma = new PrismaClient();
 
-// Mirrors apps/frontend/src/App.jsx's EMPLOYEES / INITIAL_TASKS / INITIAL_CLIENTS
-// exactly, so the seeded API responses match today's mock UI content.
+// Mirrors apps/frontend/src/App.jsx's EMPLOYEES and INITIAL_TASKS, so the seeded
+// API responses match the mock UI content.
 
 const EMPLOYEES = [
   { id: "e1", name: "Narender Kumar", role: "MD & CEO — All-Topics SME", initials: "NK" },
@@ -40,27 +40,22 @@ const TASKS = [
   { id: "NK-126", title: "Village XYZ pond X-section", client: "Village XYZ Panchayat", assigneeId: "e4", status: "todo", priority: "low" },
 ];
 
-const CLIENTS = [
-  { id: "c1", name: "Jind Infra Developers Pvt Ltd", contact: "Suresh Malik", phone: "+91 98961 23450", due: 184000, invoiceDate: "2026-05-12", lastCall: "2026-07-18", status: "overdue", notes: "Promised payment after milestone billing on the 25th." },
-  { id: "c2", name: "Jind Municipal Council", contact: "Eng. R. Dahiya", phone: "+91 98123 45678", due: 96000, invoiceDate: "2026-06-20", lastCall: "2026-07-20", status: "due-soon", notes: "Bill in final approval stage at municipal office." },
-  { id: "c3", name: "Rohtak Builders", contact: "Vinod Chhikara", phone: "+91 98221 55678", due: 52000, invoiceDate: "2026-06-02", lastCall: "2026-07-10", status: "overdue", notes: "Escalate to email if no response by Friday." },
-  { id: "c4", name: "Yamuna Bridgeworks", contact: "Neha Sharma", phone: "+91 90211 44890", due: 0, invoiceDate: "2026-05-28", lastCall: "2026-07-05", status: "paid", notes: "Cleared in full. Official receipt dispatched." },
-  { id: "c5", name: "Kaithal Roadways", contact: "Ramesh Sihag", phone: "+91 98811 22990", due: 133000, invoiceDate: "2026-06-15", lastCall: "2026-07-21", status: "due-soon", notes: "Confirmed cheque dispatch, awaiting bank clearance." },
-  { id: "c6", name: "Panipat Industries Assoc.", contact: "Devendra Ahlawat", phone: "+91 97641 33221", due: 76500, invoiceDate: "2026-04-30", lastCall: "2026-07-19", status: "overdue", notes: "Third reminder call made; requested formal statement." },
-];
+// The amount to charge for some of the sample work, in rupees. Work not listed
+// has no amount yet; 0 means the work is not charged.
+const FEES = {
+  "NK-101": 40000, "NK-102": 18000, "NK-103": 60000, "NK-104": 85000, "NK-106": 30000,
+  "NK-110": 0, "NK-112": 45000, "NK-113": 25000, "NK-119": 35000,
+};
 
 async function main() {
   for (const employee of EMPLOYEES) {
     await prisma.employee.upsert({ where: { id: employee.id }, update: employee, create: employee });
   }
   for (const task of TASKS) {
-    await prisma.task.upsert({ where: { id: task.id }, update: task, create: task });
+    const data = { ...task, fee: FEES[task.id] ?? null };
+    await prisma.task.upsert({ where: { id: task.id }, update: data, create: data });
   }
-  for (const client of CLIENTS) {
-    const data = { ...client, invoiceDate: new Date(client.invoiceDate), lastCall: new Date(client.lastCall) };
-    await prisma.client.upsert({ where: { id: client.id }, update: data, create: data });
-  }
-  console.log(`Seeded ${EMPLOYEES.length} employees, ${TASKS.length} tasks, ${CLIENTS.length} clients.`);
+  console.log(`Seeded ${EMPLOYEES.length} employees and ${TASKS.length} tasks.`);
 }
 
 main()
