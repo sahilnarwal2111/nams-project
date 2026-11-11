@@ -16,6 +16,9 @@ model Employee {
   role     String
   initials String
   tasks    Task[]
+  // Personal sign-in password, set by an admin. "scrypt$<salt>$<hash>", never
+  // returned by the API. null means this person cannot sign in on their own.
+  passwordHash String?
 }
 
 model Task {
@@ -42,6 +45,12 @@ model Task {
   details            String?
   // A calendar date with no time: stored as midnight UTC.
   expectedCompletion DateTime?
+
+  // When the task was created through the API, and when it last moved to
+  // "done" (cleared if it is moved back). Null on tasks that predate these
+  // columns: their real dates are unknown.
+  createdAt   DateTime?
+  completedAt DateTime?
 }
 
 model Client {
@@ -55,4 +64,32 @@ model Client {
   // Matches PAY_STATUS_META keys: "paid" | "due-soon" | "overdue"
   status      String
   notes       String?
+  payments    Payment[]
+}
+
+// Money received from a client. Recording one lowers Client.due in the same
+// transaction, so the payments are the history behind the current balance.
+model Payment {
+  id         Int      @id @default(autoincrement())
+  clientId   String
+  client     Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  // Whole rupees, always more than zero.
+  amount     Int
+  receivedAt DateTime @default(now())
+  note       String?
+
+  @@index([clientId])
+}
+
+// A message sent from the public landing page. Anyone can create one; only
+// signed-in staff can read, update or delete them.
+model Enquiry {
+  id        Int      @id @default(autoincrement())
+  name      String
+  phone     String
+  // What the visitor needs, in their words. Optional.
+  message   String?
+  // "new" | "contacted" | "closed"
+  status    String   @default("new")
+  createdAt DateTime @default(now())
 }

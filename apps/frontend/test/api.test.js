@@ -1,6 +1,18 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  sharedChoiceLabel,
+  viewerLabel,
+  canEditTask,
+  signInChoices,
+  defaultSignInChoice,
+  personalPasswordError,
+  sessionRole,
+  paymentPending,
+  daysAgo,
+  enquiryError,
+  enquiryToApi,
+  enquiryFromApi,
   taskFromApi,
   tasksFromApi,
   employeeFromApi,
@@ -9,6 +21,17 @@ import {
   taskToApi,
   taskFromForm,
   nextLocalTaskId,
+  parseRupees,
+  clientFormError,
+  clientToApi,
+  paymentError,
+  paymentPatchBody,
+  paymentToApi,
+  paymentFromApi,
+  nextLocalClientId,
+  authHeaders,
+  sessionState,
+  getToken,
   dateFromApi,
   instantFromApi,
   localDay,
@@ -188,4 +211,240 @@ test("nextLocalTaskId continues the NK sequence numerically", () => {
   assert.equal(nextLocalTaskId([]), "NK-001");
   assert.equal(nextLocalTaskId([{ id: "NK-101" }, { id: "NK-126" }, { id: "NK-99" }]), "NK-127");
   assert.equal(nextLocalTaskId([{ id: "NK-999" }, { id: "other" }]), "NK-1000");
+});
+
+const clientForm = {
+  name: " Hisar Developers ",
+  contact: " R. Punia ",
+  phone: " +91 90000 22222 ",
+  due: "1,25,000",
+  invoiceDate: "2026-11-01",
+  status: "due-soon",
+  notes: "  ",
+};
+
+test("parseRupees reads whole rupees and rejects everything else", () => {
+  assert.equal(parseRupees("1,84,000"), 184000);
+  assert.equal(parseRupees(" ₹ 500 "), 500);
+  assert.equal(parseRupees("0"), 0);
+  assert.equal(parseRupees(96000), 96000);
+  for (const bad of ["", "  ", "-5", "10.5", "abc", "1e3", null, undefined]) {
+    assert.ok(Number.isNaN(parseRupees(bad)), `expected NaN for ${JSON.stringify(bad)}`);
+  }
+});
+
+test("clientFormError accepts a valid form and names each problem", () => {
+  assert.equal(clientFormError(clientForm), null);
+  assert.match(clientFormError({ ...clientForm, name: "  " }), /required/);
+  assert.match(clientFormError({ ...clientForm, phone: "" }), /required/);
+  assert.match(clientFormError({ ...clientForm, due: "12.5" }), /whole number/);
+  assert.match(clientFormError({ ...clientForm, due: "" }), /whole number/);
+  assert.match(clientFormError({ ...clientForm, invoiceDate: "" }), /Invoice date/);
+  assert.match(clientFormError({ ...clientForm, status: "paid" }), /cannot be marked as paid/);
+  assert.equal(clientFormError({ ...clientForm, due: "0", status: "paid" }), null);
+});
+
+test("clientToApi trims text, parses the amount and sends blank notes as null", () => {
+  assert.deepEqual(clientToApi(clientForm), {
+    name: "Hisar Developers",
+    contact: "R. Punia",
+    phone: "+91 90000 22222",
+    due: 125000,
+    invoiceDate: "2026-11-01",
+    status: "due-soon",
+    notes: null,
+  });
+});
+
+test("clientToApi marks a client who owes nothing as paid and never sends lastCall", () => {
+  const body = clientToApi({ ...clientForm, due: "0", status: "overdue", lastCall: "2026-01-01" });
+  assert.equal(body.status, "paid");
+  assert.equal(body.due, 0);
+  assert.equal("lastCall" in body, false);
+});
+
+test("paymentError checks the amount against the dues", () => {
+  const client = { id: "c1", due: 50000, status: "overdue" };
+  assert.equal(paymentError(client, "20,000"), null);
+  assert.equal(paymentError(client, "50000"), null);
+  assert.match(paymentError(client, "50001"), /more than/);
+  assert.match(paymentError(client, "0"), /amount received/);
+  assert.match(paymentError(client, ""), /amount received/);
+  assert.match(paymentError(client, "-10"), /amount received/);
+});
+
+test("paymentPatchBody reduces the dues and marks a cleared account as paid", () => {
+  const client = { id: "c1", due: 50000, status: "overdue" };
+  assert.deepEqual(paymentPatchBody(client, "20,000"), { due: 30000 });
+  assert.deepEqual(paymentPatchBody(client, "50000"), { due: 0, status: "paid" });
+});
+
+test("nextLocalClientId continues the c# sequence numerically", () => {
+  assert.equal(nextLocalClientId([]), "c1");
+  assert.equal(nextLocalClientId([{ id: "c1" }, { id: "c6" }, { id: "c10" }, { id: "x" }]), "c11");
+});
+
+test("authHeaders sends a Bearer token only when signed in", () => {
+  assert.deepEqual(authHeaders("abc.def"), { Authorization: "Bearer abc.def" });
+  assert.deepEqual(authHeaders(null), {});
+  assert.equal(getToken(), null, "no token before signing in");
+  assert.deepEqual(authHeaders(), {});
+});
+
+test("sessionState decides between open, sign-in and signed-in", () => {
+  assert.equal(sessionState({ required: false, authenticated: false }), "open");
+  assert.equal(sessionState({ required: true, authenticated: false }), "login");
+  assert.equal(sessionState({ required: true, authenticated: true }), "signedIn");
+});
+
+test("paymentToApi parses the amount and sends a blank note as null", () => {
+  assert.deepEqual(paymentToApi("25,000", "  Cheque 4412 "), { amount: 25000, note: "Cheque 4412" });
+  assert.deepEqual(paymentToApi("500", "   "), { amount: 500, note: null });
+  assert.deepEqual(paymentToApi("500", undefined), { amount: 500, note: null });
+});
+
+test("paymentFromApi puts the payment on the viewer's local day", () => {
+  const justAfterMidnight = new Date(2026, 10, 11, 0, 30);
+  const p = paymentFromApi({ id: 7, clientId: "c1", amount: 5000, note: null, receivedAt: justAfterMidnight.toISOString() });
+  assert.equal(p.receivedAt, "2026-11-11");
+  assert.equal(p.amount, 5000);
+  assert.equal(p.id, 7);
+});
+
+test("taskFromApi shows completedAt as a local day and leaves createdAt as a timestamp", () => {
+  const justAfterMidnight = new Date(2026, 10, 11, 0, 30).toISOString();
+  const t = taskFromApi({ ...apiTask, createdAt: "2026-11-01T04:00:00.000Z", completedAt: justAfterMidnight });
+  assert.equal(t.completedAt, "2026-11-11");
+  assert.equal(t.createdAt, "2026-11-01T04:00:00.000Z");
+  assert.equal(taskFromApi({ ...apiTask, completedAt: null }).completedAt, null);
+});
+
+test("enquiryError asks for a name and a plausible phone number", () => {
+  const ok = { name: "Ramesh", phone: "+91 98765-43210", message: "" };
+  assert.equal(enquiryError(ok), null);
+  assert.equal(enquiryError({ ...ok, phone: "(01681) 245678" }), null);
+  assert.match(enquiryError({ ...ok, name: "   " }), /name/i);
+  assert.match(enquiryError({ ...ok, name: "x".repeat(101) }), /100/);
+  for (const phone of ["", "12345", "call me", "98765432109876543210", "98765 4321x"]) {
+    assert.match(enquiryError({ ...ok, phone }), /phone/i, phone);
+  }
+  assert.match(enquiryError({ ...ok, message: "x".repeat(1001) }), /1000/);
+  assert.equal(enquiryError({ ...ok, message: "x".repeat(1000) }), null);
+});
+
+test("enquiryToApi trims, sends a blank message as null and passes the hidden field only when filled", () => {
+  assert.deepEqual(enquiryToApi({ name: " Ramesh ", phone: " 9876543210 ", message: "  " }), { name: "Ramesh", phone: "9876543210", message: null });
+  assert.deepEqual(enquiryToApi({ name: "Ramesh", phone: "9876543210", message: " Plot survey ", website: "" }), { name: "Ramesh", phone: "9876543210", message: "Plot survey" });
+  assert.equal(enquiryToApi({ name: "Bot", phone: "9876543210", message: "", website: "http://x" }).website, "http://x");
+});
+
+test("enquiryFromApi shows the arrival time as the local day", () => {
+  const justAfterMidnight = new Date(2026, 10, 11, 0, 30).toISOString();
+  const e = enquiryFromApi({ id: 3, name: "Ramesh", phone: "9876543210", message: null, status: "new", createdAt: justAfterMidnight });
+  assert.equal(e.createdAt, "2026-11-11");
+  assert.equal(e.status, "new");
+});
+
+test("daysAgo counts calendar days, whatever the time of day", () => {
+  assert.equal(daysAgo("2026-11-11", "2026-11-11"), "Today");
+  assert.equal(daysAgo("2026-11-10", "2026-11-11"), "1 day ago");
+  assert.equal(daysAgo("2026-11-04", "2026-11-11"), "7 days ago");
+  assert.equal(daysAgo("2026-10-31", "2026-11-01"), "1 day ago");
+  assert.equal(daysAgo("2026-11-12", "2026-11-11"), "Today", "a future day is not negative");
+});
+
+test("daysAgo says Today for today's date late in the evening", (t) => {
+  // The old version rounded hours since midnight, so after midday today read as "1 day ago".
+  t.mock.timers.enable({ apis: ["Date"], now: new Date(2026, 10, 11, 21, 45) });
+  assert.equal(daysAgo("2026-11-11"), "Today");
+  assert.equal(daysAgo("2026-11-10"), "1 day ago");
+});
+
+test("sessionRole is admin only when the server says so or sign-in is off", () => {
+  assert.equal(sessionRole({ required: false, authenticated: false, role: "admin" }), "admin");
+  assert.equal(sessionRole({ required: false, authenticated: false }), "admin");
+  assert.equal(sessionRole({ required: true, authenticated: true, role: "admin" }), "admin");
+  assert.equal(sessionRole({ required: true, authenticated: true, role: "staff" }), "staff");
+  assert.equal(sessionRole({ required: true, authenticated: true }), "staff", "an older server with no role");
+  assert.equal(sessionRole({ required: true, authenticated: true, role: "owner" }), "staff");
+  assert.equal(sessionRole({ required: true, authenticated: false, role: null }), "staff");
+});
+
+test("paymentPending uses the amount when known and the status when it is hidden", () => {
+  assert.equal(paymentPending({ due: 5000, status: "overdue" }), true);
+  assert.equal(paymentPending({ due: 0, status: "paid" }), false);
+  assert.equal(paymentPending({ due: 0, status: "overdue" }), false, "the amount wins for an admin");
+  assert.equal(paymentPending({ status: "overdue" }), true);
+  assert.equal(paymentPending({ status: "due-soon" }), true);
+  assert.equal(paymentPending({ status: "paid" }), false);
+});
+
+test("clientFromApi keeps a client without an amount as it is", () => {
+  const c = clientFromApi({ id: "c1", name: "A", status: "overdue", invoiceDate: "2026-05-12T00:00:00.000Z", lastCall: "2026-07-18T10:00:00.000Z" });
+  assert.equal("due" in c, false);
+  assert.equal(c.invoiceDate, "2026-05-12");
+});
+
+test("canEditTask lets an admin edit anything and a person only their own work", () => {
+  const task = { id: "NK-102", assignee: "e6" };
+  assert.equal(canEditTask(task, { isAdmin: true, employeeId: null }), true);
+  assert.equal(canEditTask(task, { isAdmin: false, employeeId: "e6" }), true);
+  assert.equal(canEditTask(task, { isAdmin: false, employeeId: "e4" }), false);
+  assert.equal(canEditTask(task, { isAdmin: false, employeeId: null }), false, "office sign-in is view only");
+  assert.equal(canEditTask({ id: "x", assignee: undefined }, { isAdmin: false, employeeId: undefined }), false);
+  assert.equal(canEditTask(task, undefined), false);
+});
+
+test("sign-in choices start with the shared password, then people", () => {
+  const people = [{ id: "e4", name: "Rajesh Kumar" }, { id: "e6", name: "Ankit" }];
+  assert.deepEqual(signInChoices(people).map((c) => c.value), ["shared", "e4", "e6"]);
+  assert.deepEqual(signInChoices().map((c) => c.value), ["shared"]);
+  assert.equal(defaultSignInChoice(people), "shared", "issue #42: the admin must not have to change the list");
+  assert.equal(defaultSignInChoice(people, "e6"), "e6");
+  assert.equal(defaultSignInChoice(people, "office"), "shared", "old remembered choices fall back to shared");
+  assert.equal(defaultSignInChoice(people, "admin"), "shared");
+  assert.equal(defaultSignInChoice(people, "e9"), "shared", "a person who can no longer sign in is not offered");
+  assert.equal(defaultSignInChoice([], null), "shared");
+});
+
+test("personalPasswordError asks for 6 to 200 characters", () => {
+  assert.match(personalPasswordError("12345"), /6/);
+  assert.equal(personalPasswordError("123456"), null);
+  assert.match(personalPasswordError("x".repeat(201)), /200/);
+});
+
+test("employeeFromApi keeps hasPassword only when the API sends it", () => {
+  const base = { id: "e6", name: "Ankit", role: "Survey Lead", initials: "AN" };
+  assert.equal(employeeFromApi({ ...base, hasPassword: true }).hasPassword, true);
+  assert.equal("hasPassword" in employeeFromApi(base), false);
+  assert.equal("passwordHash" in employeeFromApi({ ...base, passwordHash: "scrypt$x$y" }), false);
+});
+
+test("sign-in choices list every profile and mark the ones without a password", () => {
+  const people = [
+    { id: "e1", name: "Narender Kumar", hasPassword: false },
+    { id: "e6", name: "Ankit", hasPassword: true },
+  ];
+  assert.deepEqual(signInChoices(people), [
+    { value: "shared", label: "Admin or office password", ready: true },
+    { value: "e1", name: "Narender Kumar", label: "Narender Kumar (no password yet)", ready: false },
+    { value: "e6", name: "Ankit", label: "Ankit", ready: true },
+  ]);
+  assert.equal(defaultSignInChoice(people, "e6"), "e6");
+  assert.equal(defaultSignInChoice(people, "e1"), "shared", "a profile without a password is never preselected");
+  assert.equal(defaultSignInChoice(people, null), "shared");
+});
+
+test("sharedChoiceLabel names the shared passwords that exist", () => {
+  assert.equal(sharedChoiceLabel({ admin: true, office: true }), "Admin or office password");
+  assert.equal(sharedChoiceLabel({ admin: false, office: true }), "Office password");
+  assert.equal(sharedChoiceLabel({ admin: true, office: false }), "Admin password");
+  assert.equal(sharedChoiceLabel(undefined), "Admin or office password");
+  assert.equal(signInChoices([], { admin: false, office: true })[0].label, "Office password");
+});
+
+test("viewerLabel names a person, the admin or the office sign-in", () => {
+  assert.equal(viewerLabel({ role: "staff", name: "Ankit" }), "Ankit");
+  assert.equal(viewerLabel({ role: "admin", name: null }), "Admin");
+  assert.equal(viewerLabel({ role: "staff", name: null }), "Office");
 });

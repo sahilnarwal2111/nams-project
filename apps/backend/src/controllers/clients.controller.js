@@ -1,5 +1,15 @@
 import { prisma } from "../lib/prisma.js";
 import { parseDate } from "../lib/dates.js";
+import { ADMIN_ONLY_MESSAGE } from "../lib/auth.js";
+
+// What a viewer may see of a client: only an admin gets the amount due. Staff
+// still get the status, so they know whether payment is received or pending.
+function forRole(client, role) {
+  if (role === "admin") return client;
+  const rest = { ...client };
+  delete rest.due;
+  return rest;
+}
 
 const VALID_STATUSES = ["paid", "due-soon", "overdue"];
 const TEXT_FIELDS = ["name", "contact", "phone"];
@@ -76,7 +86,7 @@ export async function createClient(req, res) {
 
 export async function listClients(req, res) {
   const clients = await prisma.client.findMany({ orderBy: { id: "asc" } });
-  res.json(clients);
+  res.json(clients.map((client) => forRole(client, req.role)));
 }
 
 const EDITABLE_FIELDS = ["name", "contact", "phone", "due", "invoiceDate", "lastCall", "status", "notes"];
@@ -119,11 +129,13 @@ export async function updateClient(req, res) {
   const { id } = req.params;
   const { data, error } = parseClientPatch(req.body ?? {});
   if (error) return res.status(400).json({ error });
+  // Logging a call is open to all staff; editing the record is not.
   if (Object.keys(data).length === 0) data.lastCall = new Date();
+  else if (req.role !== "admin") return res.status(403).json({ error: ADMIN_ONLY_MESSAGE });
 
   try {
     const client = await prisma.client.update({ where: { id }, data });
-    res.json(client);
+    res.json(forRole(client, req.role));
   } catch (err) {
     if (err.code === "P2025") return res.status(404).json({ error: `Client ${id} not found` });
     throw err;

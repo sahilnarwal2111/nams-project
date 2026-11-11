@@ -2,12 +2,19 @@ import { useState, useMemo, useEffect } from "react";
 import {
   hasApi, fetchEmployees, fetchTasks, updateTaskStatus, fetchClients, logClientCall, localDay,
   createTask, updateTask, deleteTask, taskFromForm, nextLocalTaskId,
+  createClient, updateClient, deleteClient, recordPayment, fetchPayments,
+  clientToApi, clientFormError, paymentError, paymentPatchBody, parseRupees, nextLocalClientId,
+  fetchSession, login, logout, onAuthLost,
+  daysAgo, paymentPending, enquiryError,
+  fetchTeam, canEditTask, viewerLabel, signInChoices, defaultSignInChoice, personalPasswordError, setEmployeePassword, clearEmployeePassword, sendEnquiry, fetchEnquiries, updateEnquiryStatus, deleteEnquiry,
 } from "./api.js";
+import { filterTasks, sortTasks, isOverdue, SORT_MODES, workCounts } from "./board.js";
+import { pageFromHash, hashForPage, anchorFromHash } from "./route.js";
 import {
   Ruler, Route, Building2, Droplets, Plane, Waves,
   Menu, X, ChevronRight, Clock, PhoneCall,
   Mail, Phone, MapPin, ArrowLeft,
-  ArrowRight, Filter, ChevronDown, Plus, Pencil, Trash2, CalendarDays
+  ArrowRight, Filter, ChevronDown, Plus, Pencil, Trash2, CalendarDays, IndianRupee, Lock, LogOut, History, Search, CircleCheck, Send, MessageSquare, KeyRound, UserRound, Eye, Info
 } from "lucide-react";
 
 /* ---------------------------------------------------------------
@@ -113,24 +120,32 @@ const PAY_STATUS_META = {
   overdue: { label: "Overdue", color: C.orangeDeep, bg: "#FDF0EA" },
 };
 
+const ENQUIRY_STATUS_META = {
+  new: { label: "New", color: C.orangeDeep, bg: "#FDF0EA" },
+  contacted: { label: "Contacted", color: C.blue, bg: "#EBF3FA" },
+  closed: { label: "Closed", color: C.green, bg: "#EEF3ED" },
+};
+
+// Mock mode only: sample enquiries, newest first.
+const INITIAL_ENQUIRIES = [
+  { id: 2, name: "Suresh Malik", phone: "+91 98120 44556", message: "Need a boundary survey for a 2 acre plot near Uchana before registry.", status: "new", createdAt: "2026-11-10" },
+  { id: 1, name: "Kavita Sharma", phone: "+91 94160 22113", message: "Quotation for drone survey of a warehouse site in Narwana.", status: "contacted", createdAt: "2026-11-07" },
+];
+
 const fmtINR = (n) => "₹" + n.toLocaleString("en-IN");
 const fmtDate = (s) => new Date(s + "T00:00:00").toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
-const daysAgo = (s) => {
-  const diff = Math.round((Date.now() - new Date(s + "T00:00:00").getTime()) / 86400000);
-  if (diff <= 0) return "Today";
-  if (diff === 1) return "1 day ago";
-  return `${diff} days ago`;
-};
 
 /* ---------------------------------------------------------------
    NAVIGATION BAR
 ------------------------------------------------------------------*/
-function TopNav({ page, setPage }) {
+function TopNav({ page, setPage, onSignOut, userName, showTeam }) {
   const [open, setOpen] = useState(false);
   const items = [
     { id: "home", label: "Overview" },
     { id: "work", label: "Work Board" },
     { id: "payments", label: "Receivables" },
+    { id: "enquiries", label: "Enquiries" },
+    ...(showTeam ? [{ id: "team", label: "Team" }] : []),
   ];
 
   return (
@@ -162,6 +177,20 @@ function TopNav({ page, setPage }) {
               </button>
             );
           })}
+          {onSignOut && (
+            <button
+              onClick={onSignOut}
+              style={{ color: C.blueLight, borderColor: C.lineDark }}
+              className="f-body text-xs px-3 py-1.5 ml-3 font-medium rounded border flex items-center gap-1.5 hover:text-white"
+            >
+              <LogOut size={13} /> Sign out
+            </button>
+          )}
+          {onSignOut && userName && (
+            <span data-testid="signed-in-as" style={{ color: C.blueLight }} className="f-body text-xs ml-2 flex items-center gap-1">
+              <UserRound size={13} /> {userName}
+            </span>
+          )}
         </nav>
 
         {/* Mobile Toggle */}
@@ -194,6 +223,15 @@ function TopNav({ page, setPage }) {
               </button>
             );
           })}
+          {onSignOut && (
+            <button
+              onClick={() => { onSignOut(); setOpen(false); }}
+              style={{ color: C.blueLight }}
+              className="f-body text-sm px-4 py-3 w-full text-left font-medium flex items-center gap-2"
+            >
+              <LogOut size={15} /> Sign out{userName ? ` (${userName})` : ""}
+            </button>
+          )}
         </div>
       )}
     </header>
@@ -203,7 +241,93 @@ function TopNav({ page, setPage }) {
 /* ---------------------------------------------------------------
    LANDING / OVERVIEW PAGE
 ------------------------------------------------------------------*/
-function Landing({ setPage }) {
+// The public "contact us" form. onSend returns a promise; a rejection is shown
+// and the visitor's text is kept so they can try again.
+function EnquiryForm({ onSend }) {
+  const empty = { name: "", phone: "", message: "", website: "" };
+  const [form, setForm] = useState(empty);
+  const [state, setState] = useState({ step: "idle" }); // idle | sending | sent | error
+  const set = (key) => (e) => setForm((f) => ({ ...f, [key]: e.target.value }));
+  const inputStyle = { borderColor: C.line, color: C.ink };
+
+  const submit = (e) => {
+    e.preventDefault();
+    if (state.step === "sending") return;
+    const problem = enquiryError(form);
+    if (problem) return setState({ step: "error", message: problem });
+    setState({ step: "sending" });
+    onSend(form)
+      .then(() => { setForm(empty); setState({ step: "sent" }); })
+      .catch((err) => setState({ step: "error", message: err.message }));
+  };
+
+  if (state.step === "sent") {
+    return (
+      <div role="status" style={{ background: C.card, borderColor: C.line }} className="border rounded-md p-8 text-center shadow-sm">
+        <div style={{ background: "#EEF3ED", color: C.green }} className="w-12 h-12 rounded-full flex items-center justify-center mx-auto mb-4">
+          <CircleCheck size={24} />
+        </div>
+        <h3 style={{ color: C.ink }} className="f-display text-lg font-bold mb-1">Thank you. We have your enquiry.</h3>
+        <p style={{ color: C.steel }} className="f-body text-sm mb-5">Our office will call you back on the number you gave.</p>
+        <button onClick={() => setState({ step: "idle" })} style={{ color: C.blue }} className="f-body text-sm font-semibold underline">
+          Send another enquiry
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <form onSubmit={submit} noValidate aria-label="Enquiry form" style={{ background: C.card, borderColor: C.line }} className="border rounded-md p-6 shadow-sm space-y-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <Field label="Your name" required>
+          <input name="name" value={form.name} onChange={set("name")} maxLength={100} autoComplete="name" style={inputStyle} className={INPUT_CLASS} />
+        </Field>
+        <Field label="Phone number" required>
+          <input name="phone" type="tel" value={form.phone} onChange={set("phone")} maxLength={25} autoComplete="tel" placeholder="+91" style={inputStyle} className={INPUT_CLASS} />
+        </Field>
+      </div>
+      <Field label="What do you need?">
+        <textarea name="message" value={form.message} onChange={set("message")} rows={4} maxLength={1000} placeholder="For example: boundary survey of a plot in Safidon" style={inputStyle} className={INPUT_CLASS} />
+      </Field>
+      {/* Hidden from people; only a script fills it in, and the server drops those. */}
+      <div aria-hidden="true" className="absolute -left-[9999px] w-px h-px overflow-hidden">
+        <label>Website <input name="website" tabIndex={-1} autoComplete="off" value={form.website} onChange={set("website")} /></label>
+      </div>
+      {state.step === "error" && (
+        <div role="alert" style={{ borderColor: C.orangeDeep, background: "#FDF0EA", color: C.orangeDeep }} className="border rounded px-3 py-2 f-body text-sm">
+          {state.message}
+        </div>
+      )}
+      <button
+        type="submit"
+        disabled={state.step === "sending"}
+        style={{ background: C.orange, color: "#FFFFFF" }}
+        className="f-body font-semibold text-sm px-6 py-3 rounded shadow-sm hover:opacity-95 disabled:opacity-60 flex items-center justify-center gap-2 w-full sm:w-auto"
+      >
+        <Send size={15} /> {state.step === "sending" ? "Sending…" : "Send Enquiry"}
+      </button>
+    </form>
+  );
+}
+
+// The team shown on the landing page: the mock list, or the database's in API
+// mode. Nothing is shown until the API answers, so visitors never see old names.
+function useTeam() {
+  const useApi = hasApi();
+  const [team, setTeam] = useState(useApi ? null : EMPLOYEES);
+  useEffect(() => {
+    if (!useApi) return undefined;
+    let cancelled = false;
+    fetchTeam()
+      .then((list) => { if (!cancelled) setTeam(list); })
+      .catch(() => { if (!cancelled) setTeam([]); });
+    return () => { cancelled = true; };
+  }, [useApi]);
+  return team;
+}
+
+function Landing({ setPage, onEnquiry }) {
+  const team = useTeam();
   return (
     <div className="w-full">
       {/* HERO */}
@@ -230,6 +354,13 @@ function Landing({ setPage }) {
                 className="f-body font-medium text-sm px-6 py-3.5 rounded border hover:bg-white/5 transition-colors flex items-center justify-center gap-2"
               >
                 Explore Services <ChevronDown size={16} />
+              </a>
+              <a
+                href="#enquiry"
+                style={{ borderColor: C.lineDark, color: C.paper }}
+                className="f-body font-medium text-sm px-6 py-3.5 rounded border hover:bg-white/5 transition-colors flex items-center justify-center gap-2"
+              >
+                Send an Enquiry <MessageSquare size={16} />
               </a>
             </div>
           </div>
@@ -270,7 +401,10 @@ function Landing({ setPage }) {
             <h2 style={{ color: C.paper }} className="f-display text-2xl sm:text-3xl font-bold">Multidisciplinary Practice Leaders</h2>
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            {EMPLOYEES.map((e) => (
+            {team === null && [0, 1, 2, 3].map((i) => (
+              <div key={i} data-testid="team-placeholder" style={{ background: "rgba(255,255,255,0.04)", borderColor: C.lineDark }} className="border rounded-md p-5 h-[92px] sm:h-[134px] animate-pulse" />
+            ))}
+            {team?.map((e) => (
               <div key={e.id} style={{ background: "rgba(255,255,255,0.04)", borderColor: C.lineDark }} className="border rounded-md p-5 flex sm:flex-col items-center sm:items-start gap-4 sm:gap-0">
                 <div style={{ background: C.orange, color: "#FFFFFF" }} className="w-11 h-11 rounded-full flex items-center justify-center f-mono text-sm font-bold shrink-0 sm:mb-4">
                   {e.initials}
@@ -281,6 +415,26 @@ function Landing({ setPage }) {
                 </div>
               </div>
             ))}
+          </div>
+        </div>
+      </section>
+
+      {/* ENQUIRY */}
+      <section id="enquiry" style={{ background: C.paper }} className="border-t border-stone-300">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-14 sm:py-20 grid grid-cols-1 lg:grid-cols-5 gap-10">
+          <div className="lg:col-span-2">
+            <div style={{ color: C.orangeDeep }} className="f-mono text-xs font-semibold tracking-wider uppercase mb-1">Get In Touch</div>
+            <h2 style={{ color: C.ink }} className="f-display text-2xl sm:text-3xl font-bold mb-4">Tell us about your site</h2>
+            <p style={{ color: C.steel }} className="f-body text-sm leading-relaxed mb-6">
+              Leave your number and a line about the work. Our office will call you back with the next steps and a quotation.
+            </p>
+            <div style={{ color: C.ink }} className="f-body text-sm space-y-2.5">
+              <div className="flex items-center gap-2.5"><Phone size={16} style={{ color: C.orange }} /> +91-9355247066</div>
+              <div className="flex items-center gap-2.5"><MapPin size={16} style={{ color: C.orange }} /> Jind, Haryana, India</div>
+            </div>
+          </div>
+          <div className="lg:col-span-3 relative">
+            <EnquiryForm onSend={onEnquiry} />
           </div>
         </div>
       </section>
@@ -307,10 +461,32 @@ function Landing({ setPage }) {
   );
 }
 
+// A boxed explanation with an optional action, used where controls are hidden
+// because of how the viewer signed in.
+function AccessNote({ testId, icon: Icon = Info, title, children, actionLabel, onAction }) {
+  return (
+    <div data-testid={testId} role="note" style={{ background: "#EBF3FA", borderColor: C.blueLight, color: C.ink }} className="border rounded-md px-4 py-3 mb-5 flex flex-col sm:flex-row sm:items-center gap-3">
+      <div className="flex items-start gap-3 flex-1">
+        <Icon size={18} style={{ color: C.blue }} className="shrink-0 mt-0.5" />
+        <div className="f-body text-sm leading-relaxed">
+          <div className="font-semibold">{title}</div>
+          {children}
+        </div>
+      </div>
+      {onAction && (
+        <button onClick={onAction} style={{ background: C.navy, color: C.paper }} className="f-body text-xs font-semibold px-4 py-2 rounded shadow-sm hover:opacity-90 shrink-0 self-start sm:self-auto">
+          {actionLabel}
+        </button>
+      )}
+    </div>
+  );
+}
+
 /* ---------------------------------------------------------------
    WORK BOARD
 ------------------------------------------------------------------*/
-function TaskCard({ task, employees, onMove, onEdit, busy }) {
+// canEdit decides whether the edit and move buttons are shown.
+function TaskCard({ task, employees, onMove, onEdit, busy, today, canEdit }) {
   const emp = employees.find((e) => e.id === task.assignee);
   const pr = PRIORITY_META[task.priority];
   const order = ["todo", "inprogress", "done"];
@@ -324,14 +500,16 @@ function TaskCard({ task, employees, onMove, onEdit, busy }) {
           <span style={{ background: pr.bg, color: pr.color }} className="f-mono text-[10px] font-semibold px-2 py-0.5 rounded">
             {pr.label}
           </span>
-          <button
-            onClick={() => onEdit(task)}
-            aria-label={`Edit ${task.id}`}
-            style={{ color: C.steel }}
-            className="p-1 rounded hover:bg-stone-100 active:scale-95 transition-transform"
-          >
-            <Pencil size={12} />
-          </button>
+          {canEdit && (
+            <button
+              onClick={() => onEdit(task)}
+              aria-label={`Edit ${task.id}`}
+              style={{ color: C.steel }}
+              className="p-1 rounded hover:bg-stone-100 active:scale-95 transition-transform"
+            >
+              <Pencil size={12} />
+            </button>
+          )}
         </div>
       </div>
       <h4 style={{ color: C.ink }} className="f-body text-sm font-semibold leading-snug mb-1">{task.title}</h4>
@@ -348,9 +526,18 @@ function TaskCard({ task, employees, onMove, onEdit, busy }) {
           ))}
         </div>
       )}
-      {task.expectedCompletion && (
-        <div style={{ color: C.steel }} className="f-body text-xs flex items-center gap-1.5 mb-2">
-          <CalendarDays size={12} style={{ color: C.blue }} /> Due {fmtDate(task.expectedCompletion)}
+      {task.expectedCompletion && (() => {
+        const overdue = isOverdue(task, today);
+        return (
+          <div style={{ color: overdue ? C.orangeDeep : C.steel }} className={`f-body text-xs flex items-center gap-1.5 mb-2 ${overdue ? "font-semibold" : ""}`}>
+            <CalendarDays size={12} style={{ color: overdue ? C.orangeDeep : C.blue }} />
+            {overdue ? "Overdue, was due" : "Due"} {fmtDate(task.expectedCompletion)}
+          </div>
+        );
+      })()}
+      {task.status === "done" && task.completedAt && (
+        <div style={{ color: C.green }} className="f-body text-xs flex items-center gap-1.5 mb-2">
+          <CircleCheck size={12} /> Completed {fmtDate(task.completedAt)}
         </div>
       )}
       <div className="mb-2" />
@@ -364,7 +551,7 @@ function TaskCard({ task, employees, onMove, onEdit, busy }) {
         </div>
 
         <div className="flex items-center gap-1">
-          {idx > 0 && (
+          {canEdit && idx > 0 && (
             <button
               onClick={() => onMove(task.id, order[idx - 1])}
               disabled={busy}
@@ -374,7 +561,7 @@ function TaskCard({ task, employees, onMove, onEdit, busy }) {
               <ArrowLeft size={13} />
             </button>
           )}
-          {idx < order.length - 1 && (
+          {canEdit && idx < order.length - 1 && (
             <button
               onClick={() => onMove(task.id, order[idx + 1])}
               disabled={busy}
@@ -386,6 +573,98 @@ function TaskCard({ task, employees, onMove, onEdit, busy }) {
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+// Runs a save or delete for a dialog: a rejection is shown in the dialog, which
+// stays open; success closes it.
+function useDialogAction(onClose) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const run = (action) => {
+    setBusy(true);
+    setError(null);
+    action()
+      .then(onClose)
+      .catch((err) => { setError(err.message); setBusy(false); });
+  };
+  return { busy, error, setError, run };
+}
+
+function Modal({ label, kicker, title, busy, onClose, onSubmit, footer, width = "max-w-2xl", children }) {
+  return (
+    <div
+      style={{ background: "rgba(9, 21, 36, 0.55)" }}
+      className="fixed inset-0 z-[60] flex items-start sm:items-center justify-center p-3 sm:p-6 overflow-y-auto"
+      onClick={(e) => { if (e.target === e.currentTarget && !busy) onClose(); }}
+    >
+      <form
+        onSubmit={onSubmit}
+        role="dialog"
+        aria-label={label}
+        style={{ background: C.paper, borderColor: C.line }}
+        className={`w-full ${width} border rounded-lg shadow-xl`}
+      >
+        <div style={{ background: C.navy }} className="flex items-center justify-between px-5 py-4 rounded-t-lg">
+          <div>
+            <div style={{ color: C.orange }} className="f-mono text-[10px] font-semibold tracking-wider uppercase">{kicker}</div>
+            <h2 style={{ color: C.paper }} className="f-display text-lg font-bold">{title}</h2>
+          </div>
+          <button type="button" onClick={onClose} disabled={busy} aria-label="Close" style={{ color: C.paper }} className="p-1 rounded hover:opacity-80">
+            <X size={20} />
+          </button>
+        </div>
+        {children}
+        <div style={{ borderColor: C.line }} className="border-t px-5 py-4 flex items-center justify-between gap-3 flex-wrap">
+          {footer}
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function DialogError({ error }) {
+  if (!error) return null;
+  return (
+    <div role="alert" style={{ borderColor: C.orangeDeep, background: "#FDF0EA", color: C.orangeDeep }} className="sm:col-span-2 border rounded-md px-3 py-2 f-body text-sm">
+      {error}
+    </div>
+  );
+}
+
+// Delete button that asks once before calling onConfirm.
+function DeleteControl({ question, busy, onConfirm }) {
+  const [asking, setAsking] = useState(false);
+  if (!asking) {
+    return (
+      <button type="button" onClick={() => setAsking(true)} disabled={busy} style={{ color: C.orangeDeep }} className="f-body text-xs font-semibold flex items-center gap-1.5 px-2 py-2 rounded hover:bg-orange-50">
+        <Trash2 size={14} /> Delete
+      </button>
+    );
+  }
+  return (
+    <div className="flex items-center gap-2 flex-wrap">
+      <span style={{ color: C.orangeDeep }} className="f-body text-xs font-semibold">{question}</span>
+      <button type="button" onClick={onConfirm} disabled={busy} style={{ background: C.orangeDeep, color: C.paper }} className="f-body text-xs font-semibold px-3 py-1.5 rounded">
+        Yes, delete
+      </button>
+      <button type="button" onClick={() => setAsking(false)} disabled={busy} style={{ borderColor: C.line, color: C.ink }} className="f-body text-xs px-3 py-1.5 rounded border bg-white">
+        No
+      </button>
+    </div>
+  );
+}
+
+function DialogButtons({ busy, onClose, saveLabel }) {
+  return (
+    <div className="flex items-center gap-2 ml-auto">
+      <button type="button" onClick={onClose} disabled={busy} style={{ borderColor: C.line, color: C.ink }} className="f-body text-sm px-4 py-2 rounded border bg-white">
+        Cancel
+      </button>
+      <button type="submit" disabled={busy} style={{ background: C.orange, color: C.paper }} className="f-body text-sm font-semibold px-5 py-2 rounded shadow-sm hover:opacity-90 disabled:opacity-60">
+        {busy ? "Saving…" : saveLabel}
+      </button>
     </div>
   );
 }
@@ -410,7 +689,8 @@ function Field({ label, required, children }) {
 
 // Create (task = null) or edit a work item. onSave and onDelete return promises;
 // a rejection is shown in the form and the form stays open.
-function WorkForm({ task, employees, onSave, onDelete, onClose }) {
+// Only an admin may reassign or delete work.
+function WorkForm({ task, employees, onSave, onDelete, onClose, isAdmin = true }) {
   const [form, setForm] = useState(() => ({
     ...EMPTY_WORK,
     assignee: employees[0]?.id ?? "",
@@ -418,21 +698,11 @@ function WorkForm({ task, employees, onSave, onDelete, onClose }) {
       ? Object.fromEntries(Object.keys(EMPTY_WORK).map((k) => [k, task[k] ?? EMPTY_WORK[k]]))
       : {}),
   }));
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState(null);
-  const [confirmDelete, setConfirmDelete] = useState(false);
+  const { busy, error, setError, run } = useDialogAction(onClose);
 
   const set = (key) => (e) => setForm((f) => ({ ...f, [key]: e.target.value }));
   const toggleType = (id) =>
     setForm((f) => ({ ...f, workTypes: f.workTypes.includes(id) ? f.workTypes.filter((t) => t !== id) : [...f.workTypes, id] }));
-
-  const run = (action) => {
-    setBusy(true);
-    setError(null);
-    action()
-      .then(onClose)
-      .catch((err) => { setError(err.message); setBusy(false); });
-  };
 
   const submit = (e) => {
     e.preventDefault();
@@ -446,30 +716,20 @@ function WorkForm({ task, employees, onSave, onDelete, onClose }) {
   const line = { borderColor: C.line, color: C.ink };
 
   return (
-    <div
-      style={{ background: "rgba(9, 21, 36, 0.55)" }}
-      className="fixed inset-0 z-[60] flex items-start sm:items-center justify-center p-3 sm:p-6 overflow-y-auto"
-      onClick={(e) => { if (e.target === e.currentTarget && !busy) onClose(); }}
-    >
-      <form
-        onSubmit={submit}
-        role="dialog"
-        aria-label={task ? `Edit ${task.id}` : "New work"}
-        style={{ background: C.paper, borderColor: C.line }}
-        className="w-full max-w-2xl border rounded-lg shadow-xl"
-      >
-        <div style={{ background: C.navy }} className="flex items-center justify-between px-5 py-4 rounded-t-lg">
-          <div>
-            <div style={{ color: C.orange }} className="f-mono text-[10px] font-semibold tracking-wider uppercase">
-              {task ? task.id : "Work Order"}
-            </div>
-            <h2 style={{ color: C.paper }} className="f-display text-lg font-bold">{task ? "Edit Work" : "New Work"}</h2>
-          </div>
-          <button type="button" onClick={onClose} disabled={busy} aria-label="Close" style={{ color: C.paper }} className="p-1 rounded hover:opacity-80">
-            <X size={20} />
-          </button>
+    <Modal
+      label={task ? `Edit ${task.id}` : "New work"}
+      kicker={task ? task.id : "Work Order"}
+      title={task ? "Edit Work" : "New Work"}
+      busy={busy}
+      onClose={onClose}
+      onSubmit={submit}
+      footer={<>
+        <div>
+          {task && isAdmin && <DeleteControl question="Delete this work permanently?" busy={busy} onConfirm={() => run(() => onDelete(task.id))} />}
         </div>
-
+        <DialogButtons busy={busy} onClose={onClose} saveLabel={task ? "Save Changes" : "Add Work"} />
+      </>}
+    >
         <div className="p-5 grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div className="sm:col-span-2">
             <Field label="Work name" required>
@@ -526,53 +786,24 @@ function WorkForm({ task, employees, onSave, onDelete, onClose }) {
           </Field>
           <div className="sm:col-span-2">
             <Field label="Assign to" required>
-              <select name="assignee" value={form.assignee} onChange={set("assignee")} required style={line} className={INPUT_CLASS}>
+              <select name="assignee" value={form.assignee} onChange={set("assignee")} required disabled={!isAdmin} title={isAdmin ? undefined : "Only an admin can reassign work"} style={line} className={`${INPUT_CLASS} disabled:bg-stone-100 disabled:text-stone-500`}>
                 {employees.map((e) => <option key={e.id} value={e.id}>{e.name} ({e.role})</option>)}
               </select>
             </Field>
           </div>
 
-          {error && (
-            <div role="alert" style={{ borderColor: C.orangeDeep, background: "#FDF0EA", color: C.orangeDeep }} className="sm:col-span-2 border rounded-md px-3 py-2 f-body text-sm">
-              {error}
-            </div>
-          )}
+          <DialogError error={error} />
         </div>
-
-        <div style={{ borderColor: C.line }} className="border-t px-5 py-4 flex items-center justify-between gap-3 flex-wrap">
-          <div>
-            {task && !confirmDelete && (
-              <button type="button" onClick={() => setConfirmDelete(true)} disabled={busy} style={{ color: C.orangeDeep }} className="f-body text-xs font-semibold flex items-center gap-1.5 px-2 py-2 rounded hover:bg-orange-50">
-                <Trash2 size={14} /> Delete
-              </button>
-            )}
-            {task && confirmDelete && (
-              <div className="flex items-center gap-2">
-                <span style={{ color: C.orangeDeep }} className="f-body text-xs font-semibold">Delete this work permanently?</span>
-                <button type="button" onClick={() => run(() => onDelete(task.id))} disabled={busy} style={{ background: C.orangeDeep, color: C.paper }} className="f-body text-xs font-semibold px-3 py-1.5 rounded">
-                  Yes, delete
-                </button>
-                <button type="button" onClick={() => setConfirmDelete(false)} disabled={busy} style={{ borderColor: C.line, color: C.ink }} className="f-body text-xs px-3 py-1.5 rounded border bg-white">
-                  No
-                </button>
-              </div>
-            )}
-          </div>
-          <div className="flex items-center gap-2 ml-auto">
-            <button type="button" onClick={onClose} disabled={busy} style={{ borderColor: C.line, color: C.ink }} className="f-body text-sm px-4 py-2 rounded border bg-white">
-              Cancel
-            </button>
-            <button type="submit" disabled={busy} style={{ background: C.orange, color: C.paper }} className="f-body text-sm font-semibold px-5 py-2 rounded shadow-sm hover:opacity-90 disabled:opacity-60">
-              {busy ? "Saving…" : task ? "Save Changes" : "Add Work"}
-            </button>
-          </div>
-        </div>
-      </form>
-    </div>
+    </Modal>
   );
 }
 
-function WorkBoard() {
+// viewer: { isAdmin, employeeId }. An admin creates, edits, moves and deletes
+// any work; a person signed in by name edits and moves only their own; the
+// office sign-in only looks. The API enforces the same rules.
+// access (API mode with sign-in on): { adminConfigured, onSwitchSignIn,
+// onOpenTeam }, used to explain missing buttons and point at the fix.
+function WorkBoard({ viewer = { isAdmin: true, employeeId: null }, access = null }) {
   const useApi = hasApi();
   const [tasks, setTasks] = useState(useApi ? [] : INITIAL_TASKS);
   const [employees, setEmployees] = useState(useApi ? [] : EMPLOYEES);
@@ -580,16 +811,20 @@ function WorkBoard() {
   const [attempt, setAttempt] = useState(0);
   const [saveError, setSaveError] = useState(null);
   const [saving, setSaving] = useState(() => new Set());
-  const [filter, setFilter] = useState("all");
+  // A person starts on their own work.
+  const [filter, setFilter] = useState(viewer.employeeId ?? "all");
   // null = form closed, "new" = creating, a task = editing it.
   const [editing, setEditing] = useState(null);
+  const [query, setQuery] = useState("");
+  const [sort, setSort] = useState("board");
+  const today = localDay();
 
   // Both return promises so the form can show a failure and stay open.
   const saveWork = async (form) => {
     if (editing === "new") {
       const created = useApi
         ? await createTask(form)
-        : { ...taskFromForm(form), id: nextLocalTaskId(tasks), status: "todo" };
+        : { ...taskFromForm(form), id: nextLocalTaskId(tasks), status: "todo", createdAt: new Date().toISOString(), completedAt: null };
       setTasks((prev) => [...prev, created]);
     } else {
       const id = editing.id;
@@ -624,13 +859,19 @@ function WorkBoard() {
     setAttempt((a) => a + 1);
   };
 
-  const setStatus = (id, status) => setTasks((prev) => prev.map((t) => (t.id === id ? { ...t, status } : t)));
+  // Moving to "done" stamps the completion day and moving back clears it, as
+  // the server does. previous restores a card exactly after a failed save.
+  const setStatus = (id, status, previous) => setTasks((prev) => prev.map((t) => {
+    if (t.id !== id) return t;
+    if (previous) return { ...t, status, completedAt: previous.completedAt };
+    return { ...t, status, completedAt: status === "done" ? (t.status === "done" ? t.completedAt : today) : null };
+  }));
 
   // One save per card at a time: a second move while the first is still being
   // saved could otherwise roll back to a status the server never had.
   const moveTask = (id, status) => {
     const task = tasks.find((t) => t.id === id);
-    if (!task || task.status === status || saving.has(id)) return;
+    if (!task || task.status === status || saving.has(id) || !canEditTask(task, viewer)) return;
     const prevStatus = task.status;
     setSaveError(null);
     setStatus(id, status);
@@ -638,13 +879,17 @@ function WorkBoard() {
     setSaving((prev) => new Set(prev).add(id));
     updateTaskStatus(id, status)
       .catch((err) => {
-        setStatus(id, prevStatus);
+        setStatus(id, prevStatus, task);
         setSaveError(`Could not save the move for "${task.title}" (${id}); it was put back. ${err.message}`);
       })
       .finally(() => setSaving((prev) => { const next = new Set(prev); next.delete(id); return next; }));
   };
 
-  const visible = useMemo(() => (filter === "all" ? tasks : tasks.filter((t) => t.assignee === filter)), [tasks, filter]);
+  const visible = useMemo(() => {
+    const byStaff = filter === "all" ? tasks : tasks.filter((t) => t.assignee === filter);
+    return sortTasks(filterTasks(byStaff, query), sort);
+  }, [tasks, filter, query, sort]);
+  const overdueCount = tasks.filter((t) => isOverdue(t, today)).length;
   const columns = ["todo", "inprogress", "done"];
   const counts = { todo: 0, inprogress: 0, done: 0 };
   tasks.forEach((t) => { counts[t.status]++; });
@@ -658,7 +903,12 @@ function WorkBoard() {
           <div>
             <div style={{ color: C.orangeDeep }} className="f-mono text-xs font-semibold tracking-wider uppercase mb-1">Task Operations</div>
             <h1 style={{ color: C.ink }} className="f-display text-2xl sm:text-3xl font-bold">Project Work Board</h1>
-            {load.state === "ready" && (
+            {!viewer.isAdmin && viewer.employeeId && (
+              <p data-testid="board-access" style={{ color: C.steel }} className="f-body text-sm mt-1">
+                You can update and move the work assigned to you. An admin adds and assigns new work.
+              </p>
+            )}
+            {load.state === "ready" && viewer.isAdmin && (
               <button
                 onClick={() => setEditing("new")}
                 style={{ background: C.orange, color: C.paper }}
@@ -677,6 +927,23 @@ function WorkBoard() {
             ))}
           </div>
         </div>
+
+        {/* Why buttons are missing, and what to do about it */}
+        {!viewer.isAdmin && !viewer.employeeId && (
+          <AccessNote testId="board-access" icon={Eye} title="View only: you are signed in with the office password" actionLabel="Switch sign-in" onAction={access?.onSwitchSignIn}>
+            <div>The buttons to add, edit and move work are hidden for this sign-in. Sign in with the admin password to manage all work, or with your own name to update the work assigned to you.</div>
+            {access && !access.adminConfigured && (
+              <div data-testid="no-admin-note" style={{ color: C.orangeDeep }} className="font-semibold mt-1">
+                No admin password is set on the server yet. Add ADMIN_PASSWORD in the Render dashboard first.
+              </div>
+            )}
+          </AccessNote>
+        )}
+        {viewer.isAdmin && access && load.state === "ready" && employees.length > 0 && employees.every((e) => e.hasPassword === false) && (
+          <AccessNote testId="team-hint" icon={KeyRound} title="Nobody has their own sign-in yet" actionLabel="Open Team page" onAction={access.onOpenTeam}>
+            <div>Until you set a password for each person on the Team page, only you can move and edit work. Everyone else can only look.</div>
+          </AccessNote>
+        )}
 
         {load.state === "loading" && (
           <div style={{ borderColor: C.line, color: C.steel, background: C.card }} className="border rounded-md p-10 text-center f-body text-sm">
@@ -704,6 +971,39 @@ function WorkBoard() {
             <button onClick={() => setSaveError(null)} aria-label="Dismiss" className="shrink-0"><X size={16} /></button>
           </div>
         )}
+
+        {/* Search & Sort */}
+        <div className="flex flex-col sm:flex-row sm:items-center gap-3 mb-4">
+          <label className="relative flex-1 max-w-md">
+            <Search size={15} style={{ color: C.steel }} className="absolute left-3 top-1/2 -translate-y-1/2" />
+            <input
+              type="search"
+              aria-label="Search work"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search by work, customer, district or NK number"
+              style={{ borderColor: C.line, color: C.ink }}
+              className="f-body text-sm w-full rounded border pl-9 pr-3 py-2 bg-white shadow-sm focus:outline-none focus:ring-2 focus:ring-orange-300"
+            />
+          </label>
+          <label className="flex items-center gap-2">
+            <span className="f-mono text-xs text-stone-500 shrink-0">Sort:</span>
+            <select
+              aria-label="Sort work"
+              value={sort}
+              onChange={(e) => setSort(e.target.value)}
+              style={{ borderColor: C.line, color: C.ink }}
+              className="f-body text-sm rounded border px-3 py-2 bg-white shadow-sm focus:outline-none focus:ring-2 focus:ring-orange-300"
+            >
+              {SORT_MODES.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
+            </select>
+          </label>
+          {overdueCount > 0 && (
+            <span data-testid="overdue-count" style={{ background: "#FDF0EA", color: C.orangeDeep, borderColor: C.orangeDeep }} className="f-body text-xs font-semibold px-3 py-1.5 rounded border sm:ml-auto self-start sm:self-auto">
+              {overdueCount} overdue
+            </span>
+          )}
+        </div>
 
         {/* Filter Bar */}
         <div className="flex items-center gap-2 mb-6 overflow-x-auto pb-2 no-scrollbar">
@@ -755,11 +1055,11 @@ function WorkBoard() {
 
                 <div className="min-h-[250px]">
                   {colTasks.map((t) => (
-                    <TaskCard key={t.id} task={t} employees={employees} onMove={moveTask} onEdit={setEditing} busy={saving.has(t.id)} />
+                    <TaskCard key={t.id} task={t} employees={employees} onMove={moveTask} onEdit={setEditing} busy={saving.has(t.id)} today={today} canEdit={canEditTask(t, viewer)} />
                   ))}
                   {colTasks.length === 0 && (
                     <div style={{ borderColor: C.line, color: C.steel }} className="border border-dashed rounded-md p-8 text-center f-body text-xs">
-                      No assignments found in this status.
+                      {query.trim() ? "No work matches your search here." : "No assignments found in this status."}
                     </div>
                   )}
                 </div>
@@ -778,6 +1078,7 @@ function WorkBoard() {
           onSave={saveWork}
           onDelete={removeWork}
           onClose={() => setEditing(null)}
+          isAdmin={viewer.isAdmin}
         />
       )}
     </div>
@@ -787,8 +1088,11 @@ function WorkBoard() {
 /* ---------------------------------------------------------------
    PAYMENTS / RECEIVABLES PAGE
 ------------------------------------------------------------------*/
-function ClientCard({ client, onCallLogged, busy }) {
+// isAdmin decides whether amounts and the money actions are shown. Staff see
+// only whether payment is received or pending.
+function ClientCard({ client, onCallLogged, onEdit, onPayment, onHistory, busy, isAdmin }) {
   const meta = PAY_STATUS_META[client.status];
+  const pending = paymentPending(client);
   return (
     <div style={{ background: C.card, borderColor: C.line }} className="border rounded-md p-5 shadow-sm flex flex-col justify-between">
       <div>
@@ -797,16 +1101,37 @@ function ClientCard({ client, onCallLogged, busy }) {
             <h3 style={{ color: C.ink }} className="f-display text-base font-bold">{client.name}</h3>
             <div style={{ color: C.steel }} className="f-body text-xs mt-0.5">{client.contact} &nbsp;•&nbsp; {client.phone}</div>
           </div>
-          <span style={{ background: meta.bg, color: meta.color }} className="f-mono text-[10px] font-bold px-2.5 py-1 rounded shrink-0 uppercase tracking-wide">
-            {meta.label}
-          </span>
+          <div className="flex items-center gap-1 shrink-0">
+            <span style={{ background: meta.bg, color: meta.color }} className="f-mono text-[10px] font-bold px-2.5 py-1 rounded uppercase tracking-wide">
+              {meta.label}
+            </span>
+            {isAdmin && (<>
+            <button
+              onClick={() => onHistory(client)}
+              aria-label={`Payment history for ${client.name}`}
+              title="Payment history"
+              style={{ color: C.steel }}
+              className="p-1 rounded hover:bg-stone-100 active:scale-95 transition-transform"
+            >
+              <History size={13} />
+            </button>
+            <button
+              onClick={() => onEdit(client)}
+              aria-label={`Edit ${client.name}`}
+              style={{ color: C.steel }}
+              className="p-1 rounded hover:bg-stone-100 active:scale-95 transition-transform"
+            >
+              <Pencil size={13} />
+            </button>
+            </>)}
+          </div>
         </div>
 
         <div className="grid grid-cols-2 gap-3 mb-4">
           <div style={{ background: C.paper }} className="rounded p-3 border border-stone-200/60">
-            <div style={{ color: C.steel }} className="f-mono text-[10px] uppercase tracking-wider mb-1">Outstanding</div>
-            <div style={{ color: client.due > 0 ? C.orangeDeep : C.green }} className="f-display text-lg font-bold">
-              {client.due > 0 ? fmtINR(client.due) : "Settled"}
+            <div style={{ color: C.steel }} className="f-mono text-[10px] uppercase tracking-wider mb-1">{isAdmin ? "Outstanding" : "Payment"}</div>
+            <div data-testid="client-amount" style={{ color: pending ? C.orangeDeep : C.green }} className="f-display text-lg font-bold">
+              {isAdmin ? (pending ? fmtINR(client.due) : "Settled") : (pending ? "Pending" : "Received")}
             </div>
           </div>
           <div style={{ background: C.paper }} className="rounded p-3 border border-stone-200/60">
@@ -821,15 +1146,24 @@ function ClientCard({ client, onCallLogged, busy }) {
           <div style={{ color: C.steel }} className="f-body text-xs flex items-center gap-1.5">
             <Clock size={13} style={{ color: C.blue }} /> Last contacted: <strong className="text-stone-700">{daysAgo(client.lastCall)}</strong>
           </div>
-          {client.due > 0 && (
-            <button
-              onClick={() => onCallLogged(client.id)}
-              disabled={busy}
-              style={{ background: C.navy, color: C.paper }}
-              className="f-body text-xs font-semibold px-3 py-1.5 rounded flex items-center gap-1.5 shadow-sm hover:opacity-90 active:scale-95 transition-all disabled:opacity-50"
-            >
-              <PhoneCall size={13} /> Log Reminder
-            </button>
+          {pending && (
+            <div className="flex items-center gap-2">
+              {isAdmin && <button
+                onClick={() => onPayment(client)}
+                style={{ borderColor: C.green, color: C.green }}
+                className="f-body text-xs font-semibold px-3 py-1.5 rounded border bg-white flex items-center gap-1 shadow-sm hover:bg-stone-50 active:scale-95 transition-all"
+              >
+                <IndianRupee size={12} /> Record Payment
+              </button>}
+              <button
+                onClick={() => onCallLogged(client.id)}
+                disabled={busy}
+                style={{ background: C.navy, color: C.paper }}
+                className="f-body text-xs font-semibold px-3 py-1.5 rounded flex items-center gap-1.5 shadow-sm hover:opacity-90 active:scale-95 transition-all disabled:opacity-50"
+              >
+                <PhoneCall size={13} /> Log Reminder
+              </button>
+            </div>
           )}
         </div>
 
@@ -843,7 +1177,194 @@ function ClientCard({ client, onCallLogged, busy }) {
   );
 }
 
-function Payments() {
+const EMPTY_CLIENT = { name: "", contact: "", phone: "", due: "", invoiceDate: "", status: "due-soon", notes: "" };
+
+// Create (client = null) or edit a client. onSave and onDelete return promises.
+function ClientForm({ client, onSave, onDelete, onClose }) {
+  const [form, setForm] = useState(() => (
+    client
+      ? { ...EMPTY_CLIENT, ...Object.fromEntries(Object.keys(EMPTY_CLIENT).map((k) => [k, client[k] ?? ""])), due: String(client.due) }
+      : { ...EMPTY_CLIENT, invoiceDate: localDay() }
+  ));
+  const { busy, error, setError, run } = useDialogAction(onClose);
+  const set = (key) => (e) => setForm((f) => ({ ...f, [key]: e.target.value }));
+
+  const submit = (e) => {
+    e.preventDefault();
+    const problem = clientFormError(form);
+    if (problem) { setError(problem); return; }
+    run(() => onSave(form));
+  };
+
+  const line = { borderColor: C.line, color: C.ink };
+  const settled = parseRupees(form.due) === 0;
+
+  return (
+    <Modal
+      label={client ? `Edit ${client.name}` : "New client"}
+      kicker={client ? "Receivable" : "New Receivable"}
+      title={client ? "Edit Client" : "Add Client"}
+      busy={busy}
+      onClose={onClose}
+      onSubmit={submit}
+      footer={<>
+        <div>
+          {client && <DeleteControl question="Delete this client permanently?" busy={busy} onConfirm={() => run(() => onDelete(client.id))} />}
+        </div>
+        <DialogButtons busy={busy} onClose={onClose} saveLabel={client ? "Save Changes" : "Add Client"} />
+      </>}
+    >
+      <div className="p-5 grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div className="sm:col-span-2">
+          <Field label="Client name" required>
+            <input name="name" value={form.name} onChange={set("name")} required autoFocus style={line} className={INPUT_CLASS} />
+          </Field>
+        </div>
+        <Field label="Contact person" required>
+          <input name="contact" value={form.contact} onChange={set("contact")} required style={line} className={INPUT_CLASS} />
+        </Field>
+        <Field label="Phone" required>
+          <input name="phone" type="tel" value={form.phone} onChange={set("phone")} required style={line} className={INPUT_CLASS} placeholder="+91" />
+        </Field>
+        <Field label="Outstanding amount (₹)" required>
+          <input name="due" inputMode="numeric" value={form.due} onChange={set("due")} required style={line} className={INPUT_CLASS} placeholder="0" />
+        </Field>
+        <Field label="Invoice date" required>
+          <input name="invoiceDate" type="date" value={form.invoiceDate} onChange={set("invoiceDate")} required style={line} className={INPUT_CLASS} />
+        </Field>
+        <div className="sm:col-span-2">
+          <Field label="Status" required>
+            <select name="status" value={settled ? "paid" : form.status} onChange={set("status")} disabled={settled} style={line} className={INPUT_CLASS}>
+              {["overdue", "due-soon", "paid"].map((st) => <option key={st} value={st}>{PAY_STATUS_META[st].label}</option>)}
+            </select>
+          </Field>
+          {settled && <p style={{ color: C.steel }} className="f-body text-xs mt-1">Nothing outstanding, so this client is marked as paid.</p>}
+        </div>
+        <div className="sm:col-span-2">
+          <Field label="Notes">
+            <textarea name="notes" value={form.notes} onChange={set("notes")} rows={3} style={line} className={INPUT_CLASS} />
+          </Field>
+        </div>
+        <DialogError error={error} />
+      </div>
+    </Modal>
+  );
+}
+
+// Record an amount received from a client. onSave returns a promise.
+function PaymentForm({ client, onSave, onClose }) {
+  const [amount, setAmount] = useState("");
+  const [note, setNote] = useState("");
+  const { busy, error, setError, run } = useDialogAction(onClose);
+  const paid = parseRupees(amount);
+  const remaining = Number.isNaN(paid) || paid > client.due ? null : client.due - paid;
+
+  const submit = (e) => {
+    e.preventDefault();
+    const problem = paymentError(client, amount);
+    if (problem) { setError(problem); return; }
+    run(() => onSave(client, amount, note));
+  };
+
+  return (
+    <Modal
+      label={`Record payment from ${client.name}`}
+      kicker="Payment Received"
+      title={client.name}
+      busy={busy}
+      onClose={onClose}
+      onSubmit={submit}
+      width="max-w-md"
+      footer={<DialogButtons busy={busy} onClose={onClose} saveLabel="Record Payment" />}
+    >
+      <div className="p-5 grid grid-cols-1 gap-4">
+        <div style={{ background: C.card, borderColor: C.line }} className="border rounded p-3 flex items-center justify-between">
+          <span style={{ color: C.steel }} className="f-mono text-[10px] uppercase tracking-wider">Outstanding</span>
+          <span style={{ color: C.orangeDeep }} className="f-display text-lg font-bold">{fmtINR(client.due)}</span>
+        </div>
+        <Field label="Amount received (₹)" required>
+          <input name="amount" inputMode="numeric" value={amount} onChange={(e) => setAmount(e.target.value)} required autoFocus style={{ borderColor: C.line, color: C.ink }} className={INPUT_CLASS} />
+        </Field>
+        <button type="button" onClick={() => setAmount(String(client.due))} style={{ color: C.blue }} className="f-body text-xs font-semibold text-left -mt-2">
+          Paid in full ({fmtINR(client.due)})
+        </button>
+        {remaining !== null && paid > 0 && (
+          <p data-testid="remaining" style={{ color: remaining === 0 ? C.green : C.steel }} className="f-body text-sm">
+            {remaining === 0 ? "This clears the account. It will be marked as paid." : `${fmtINR(remaining)} will remain outstanding.`}
+          </p>
+        )}
+        <Field label="Note">
+          <input name="note" value={note} onChange={(e) => setNote(e.target.value)} style={{ borderColor: C.line, color: C.ink }} className={INPUT_CLASS} placeholder="e.g. Cheque no., UPI, cash" />
+        </Field>
+        <DialogError error={error} />
+      </div>
+    </Modal>
+  );
+}
+
+// The payments received from one client, newest first. load returns a promise
+// of the list.
+function PaymentHistory({ client, load, onClose }) {
+  const [state, setState] = useState({ status: "loading" });
+
+  useEffect(() => {
+    let cancelled = false;
+    load()
+      .then((payments) => { if (!cancelled) setState({ status: "ready", payments }); })
+      .catch((err) => { if (!cancelled) setState({ status: "error", message: err.message }); });
+    return () => { cancelled = true; };
+  }, [load]);
+
+  const total = state.status === "ready" ? state.payments.reduce((sum, p) => sum + p.amount, 0) : 0;
+
+  return (
+    <Modal
+      label={`Payment history for ${client.name}`}
+      kicker="Payment History"
+      title={client.name}
+      onClose={onClose}
+      onSubmit={(e) => { e.preventDefault(); onClose(); }}
+      width="max-w-md"
+      footer={
+        <button type="submit" style={{ borderColor: C.line, color: C.ink }} className="f-body text-sm px-4 py-2 rounded border bg-white ml-auto">
+          Close
+        </button>
+      }
+    >
+      <div className="p-5">
+        {state.status === "loading" && <p style={{ color: C.steel }} className="f-body text-sm text-center py-6">Loading payments…</p>}
+        {state.status === "error" && <DialogError error={`Could not load the payments. ${state.message}`} />}
+        {state.status === "ready" && state.payments.length === 0 && (
+          <p style={{ color: C.steel }} className="f-body text-sm text-center py-6">No payments recorded yet.</p>
+        )}
+        {state.status === "ready" && state.payments.length > 0 && (
+          <>
+            <div style={{ background: C.card, borderColor: C.line }} className="border rounded p-3 flex items-center justify-between mb-3">
+              <span style={{ color: C.steel }} className="f-mono text-[10px] uppercase tracking-wider">Total received</span>
+              <span data-testid="total-received" style={{ color: C.green }} className="f-display text-lg font-bold">{fmtINR(total)}</span>
+            </div>
+            <ul style={{ borderColor: C.line }} className="border rounded divide-y divide-stone-200 bg-white">
+              {state.payments.map((p) => (
+                <li key={p.id} data-testid="payment-row" className="px-3 py-2.5 flex items-start justify-between gap-3">
+                  <div>
+                    <div style={{ color: C.ink }} className="f-body text-sm font-semibold">{fmtDate(p.receivedAt)}</div>
+                    {p.note && <div style={{ color: C.steel }} className="f-body text-xs mt-0.5">{p.note}</div>}
+                  </div>
+                  <div style={{ color: C.green }} className="f-display text-sm font-bold shrink-0">{fmtINR(p.amount)}</div>
+                </li>
+              ))}
+            </ul>
+          </>
+        )}
+        <p style={{ color: C.steel }} className="f-body text-xs mt-3">
+          Still outstanding: <strong>{client.due > 0 ? fmtINR(client.due) : "nothing"}</strong>
+        </p>
+      </div>
+    </Modal>
+  );
+}
+
+function Payments({ isAdmin }) {
   const useApi = hasApi();
   const [clients, setClients] = useState(useApi ? [] : INITIAL_CLIENTS);
   const [load, setLoad] = useState(useApi ? { state: "loading" } : { state: "ready" });
@@ -853,6 +1374,52 @@ function Payments() {
   const [filter, setFilter] = useState("all");
   // The viewer's own calendar day, so "Today" is right before 05:30 IST too.
   const today = localDay();
+  // null = closed, "new" = adding, a client = editing it.
+  const [editing, setEditing] = useState(null);
+  const [paying, setPaying] = useState(null);
+  const [history, setHistory] = useState(null);
+  // Mock mode only: payments recorded in this browser, newest first, by client id.
+  const [localPayments, setLocalPayments] = useState({});
+
+  const replaceClient = (id, changes) => setClients((prev) => prev.map((c) => (c.id === id ? { ...c, ...changes } : c)));
+
+  // These return promises so the dialogs can show a failure and stay open.
+  const saveClient = async (form) => {
+    if (editing === "new") {
+      const created = useApi
+        ? await createClient(form)
+        : { ...clientToApi(form), id: nextLocalClientId(clients), lastCall: today };
+      setClients((prev) => [...prev, created]);
+    } else {
+      const id = editing.id;
+      replaceClient(id, useApi ? await updateClient(id, form) : clientToApi(form));
+    }
+  };
+
+  const removeClient = async (id) => {
+    if (useApi) await deleteClient(id);
+    setClients((prev) => prev.filter((c) => c.id !== id));
+  };
+
+  const savePayment = async (client, amount, note) => {
+    if (useApi) {
+      replaceClient(client.id, (await recordPayment(client, amount, note)).client);
+      return;
+    }
+    replaceClient(client.id, paymentPatchBody(client, amount));
+    setLocalPayments((prev) => {
+      const earlier = prev[client.id] ?? [];
+      const payment = { id: earlier.length + 1, clientId: client.id, amount: parseRupees(amount), note: note.trim() || null, receivedAt: today };
+      return { ...prev, [client.id]: [payment, ...earlier] };
+    });
+  };
+
+  // Stable while the dialog is open, so it loads once.
+  const historyId = history?.id;
+  const loadHistory = useMemo(
+    () => () => (useApi ? fetchPayments(historyId) : Promise.resolve(localPayments[historyId] ?? [])),
+    [useApi, historyId, localPayments]
+  );
 
   useEffect(() => {
     if (!useApi) return undefined;
@@ -895,7 +1462,8 @@ function Payments() {
       .finally(() => setSaving((prev) => { const next = new Set(prev); next.delete(id); return next; }));
   };
 
-  const totalDue = clients.reduce((s, c) => s + c.due, 0);
+  const totalDue = isAdmin ? clients.reduce((s, c) => s + c.due, 0) : 0;
+  const pendingCount = clients.filter(paymentPending).length;
   const overdueCount = clients.filter((c) => c.status === "overdue").length;
   const calledToday = clients.filter((c) => c.lastCall === today).length;
 
@@ -904,9 +1472,20 @@ function Payments() {
   return (
     <div style={{ background: C.paper }} className="min-h-[calc(100vh-4rem)] grid-bg py-6 sm:py-10">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <div className="mb-6">
-          <div style={{ color: C.orangeDeep }} className="f-mono text-xs font-semibold tracking-wider uppercase mb-1">Financial Log</div>
-          <h1 style={{ color: C.ink }} className="f-display text-2xl sm:text-3xl font-bold">Payment Receivables &amp; Follow-ups</h1>
+        <div className="mb-6 flex items-end justify-between gap-4 flex-wrap">
+          <div>
+            <div style={{ color: C.orangeDeep }} className="f-mono text-xs font-semibold tracking-wider uppercase mb-1">Financial Log</div>
+            <h1 style={{ color: C.ink }} className="f-display text-2xl sm:text-3xl font-bold">Payment Receivables &amp; Follow-ups</h1>
+          </div>
+          {load.state === "ready" && isAdmin && (
+            <button
+              onClick={() => setEditing("new")}
+              style={{ background: C.orange, color: C.paper }}
+              className="f-body text-sm font-semibold px-4 py-2 rounded shadow-sm hover:opacity-90 active:scale-95 transition-all inline-flex items-center gap-1.5"
+            >
+              <Plus size={16} /> Add Client
+            </button>
+          )}
         </div>
 
         {load.state === "loading" && (
@@ -938,8 +1517,10 @@ function Payments() {
 
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-8">
           <div style={{ background: C.navy }} className="rounded-md p-5 shadow-sm text-white">
-            <div style={{ color: C.blueLight }} className="f-mono text-xs uppercase tracking-wider mb-1">Total Outstanding</div>
-            <div className="f-display text-2xl sm:text-3xl font-bold">{fmtINR(totalDue)}</div>
+            <div style={{ color: C.blueLight }} className="f-mono text-xs uppercase tracking-wider mb-1">{isAdmin ? "Total Outstanding" : "Payments Pending"}</div>
+            <div data-testid="total-tile" className="f-display text-2xl sm:text-3xl font-bold">
+              {isAdmin ? fmtINR(totalDue) : <>{pendingCount} <span className="text-sm font-normal opacity-70">of {clients.length} clients</span></>}
+            </div>
           </div>
           <div style={{ background: C.card, borderColor: C.line }} className="border rounded-md p-5 shadow-sm">
             <div style={{ color: C.steel }} className="f-mono text-xs uppercase tracking-wider mb-1">Overdue Accounts</div>
@@ -948,7 +1529,7 @@ function Payments() {
           <div style={{ background: C.card, borderColor: C.line }} className="border rounded-md p-5 shadow-sm">
             <div style={{ color: C.steel }} className="f-mono text-xs uppercase tracking-wider mb-1">Followed Up Today</div>
             <div style={{ color: C.green }} className="f-display text-2xl sm:text-3xl font-bold">
-              {calledToday} <span className="text-sm font-normal text-stone-500">/ {clients.filter(c => c.due > 0).length} pending</span>
+              {calledToday} <span className="text-sm font-normal text-stone-500">/ {pendingCount} pending</span>
             </div>
           </div>
         </div>
@@ -977,11 +1558,518 @@ function Payments() {
 
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
           {visible.map((c) => (
-            <ClientCard key={c.id} client={c} onCallLogged={logCall} busy={saving.has(c.id)} />
+            <ClientCard key={c.id} client={c} onCallLogged={logCall} onEdit={setEditing} onPayment={setPaying} onHistory={setHistory} busy={saving.has(c.id)} isAdmin={isAdmin} />
           ))}
         </div>
         </>)}
       </div>
+
+      {editing && (
+        <ClientForm
+          key={editing === "new" ? "new" : editing.id}
+          client={editing === "new" ? null : editing}
+          onSave={saveClient}
+          onDelete={removeClient}
+          onClose={() => setEditing(null)}
+        />
+      )}
+      {paying && <PaymentForm key={paying.id} client={paying} onSave={savePayment} onClose={() => setPaying(null)} />}
+      {history && <PaymentHistory key={history.id} client={clients.find((c) => c.id === history.id) ?? history} load={loadHistory} onClose={() => setHistory(null)} />}
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------------
+   ENQUIRIES (staff view of the landing page form)
+------------------------------------------------------------------*/
+function EnquiryCard({ enquiry, busy, onStatus, onDelete }) {
+  const meta = ENQUIRY_STATUS_META[enquiry.status] ?? ENQUIRY_STATUS_META.new;
+  const [confirming, setConfirming] = useState(false);
+  const action = (label, status, primary) => (
+    <button
+      key={status}
+      disabled={busy}
+      onClick={() => onStatus(enquiry.id, status)}
+      style={primary ? { background: C.navy, color: C.paper } : { borderColor: C.line, color: C.ink }}
+      className={`f-body text-xs font-semibold px-3 py-2 rounded disabled:opacity-50 ${primary ? "shadow-sm hover:opacity-90" : "border bg-white hover:bg-stone-50"}`}
+    >
+      {label}
+    </button>
+  );
+  return (
+    <div data-testid="enquiry-card" style={{ background: C.card, borderColor: C.line }} className="border rounded-md p-5 shadow-sm flex flex-col">
+      <div className="flex items-start justify-between gap-3 mb-3">
+        <div className="min-w-0">
+          <h3 style={{ color: C.ink }} className="f-display text-base font-bold break-words">{enquiry.name}</h3>
+          <a href={`tel:${enquiry.phone.replace(/[^\d+]/g, "")}`} style={{ color: C.blue }} className="f-mono text-sm font-medium inline-flex items-center gap-1.5 mt-1">
+            <Phone size={13} /> {enquiry.phone}
+          </a>
+        </div>
+        <span style={{ background: meta.bg, color: meta.color }} className="f-mono text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded shrink-0">{meta.label}</span>
+      </div>
+      <p style={{ color: enquiry.message ? C.ink : C.steel }} className="f-body text-sm leading-relaxed whitespace-pre-wrap break-words mb-4 flex-1">
+        {enquiry.message || "No message left."}
+      </p>
+      <div style={{ color: C.steel }} className="f-body text-xs flex items-center gap-1.5 mb-4">
+        <CalendarDays size={12} /> Received {fmtDate(enquiry.createdAt)} · {daysAgo(enquiry.createdAt)}
+      </div>
+      <div style={{ borderColor: C.line }} className="border-t pt-3 flex flex-wrap items-center gap-2">
+        {enquiry.status === "new" && action("Mark Contacted", "contacted", true)}
+        {enquiry.status !== "closed" && action("Close", "closed", false)}
+        {enquiry.status !== "new" && action("Reopen", "new", false)}
+        <span className="ml-auto flex items-center gap-2">
+          {confirming ? (
+            <>
+              <button disabled={busy} onClick={() => onDelete(enquiry.id)} style={{ background: C.orangeDeep, color: "#FFFFFF" }} className="f-body text-xs font-semibold px-3 py-2 rounded disabled:opacity-50">Yes, delete</button>
+              <button onClick={() => setConfirming(false)} style={{ color: C.steel }} className="f-body text-xs font-medium px-2 py-2">Keep</button>
+            </>
+          ) : (
+            <button disabled={busy} onClick={() => setConfirming(true)} aria-label={`Delete enquiry from ${enquiry.name}`} style={{ color: C.steel }} className="p-2 rounded hover:bg-stone-100 disabled:opacity-50">
+              <Trash2 size={15} />
+            </button>
+          )}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+// local / setLocal hold the enquiries in mock mode, where the landing page
+// form adds to the same list.
+function Enquiries({ local, setLocal }) {
+  const useApi = hasApi();
+  const [remote, setRemote] = useState([]);
+  const [load, setLoad] = useState(useApi ? { state: "loading" } : { state: "ready" });
+  const [attempt, setAttempt] = useState(0);
+  const [saveError, setSaveError] = useState(null);
+  const [saving, setSaving] = useState(() => new Set());
+  const [filter, setFilter] = useState("open");
+  const enquiries = useApi ? remote : local;
+  const setEnquiries = useApi ? setRemote : setLocal;
+
+  useEffect(() => {
+    if (!useApi) return undefined;
+    let cancelled = false;
+    fetchEnquiries()
+      .then((list) => {
+        if (cancelled) return;
+        setRemote(list);
+        setLoad({ state: "ready" });
+      })
+      .catch((err) => {
+        if (!cancelled) setLoad({ state: "error", message: err.message });
+      });
+    return () => { cancelled = true; };
+  }, [useApi, attempt]);
+
+  const retry = () => {
+    setLoad({ state: "loading" });
+    setAttempt((a) => a + 1);
+  };
+
+  const setBusy = (id, on) => setSaving((prev) => {
+    const next = new Set(prev);
+    if (on) next.add(id); else next.delete(id);
+    return next;
+  });
+
+  // The status changes at once and goes back if the save fails.
+  const changeStatus = (id, status) => {
+    const enquiry = enquiries.find((e) => e.id === id);
+    if (!enquiry || saving.has(id)) return;
+    const previous = enquiry.status;
+    setSaveError(null);
+    setEnquiries((prev) => prev.map((e) => (e.id === id ? { ...e, status } : e)));
+    if (!useApi) return;
+    setBusy(id, true);
+    updateEnquiryStatus(id, status)
+      .catch((err) => {
+        setEnquiries((prev) => prev.map((e) => (e.id === id ? { ...e, status: previous } : e)));
+        setSaveError(`Could not update the enquiry from ${enquiry.name}. ${err.message}`);
+      })
+      .finally(() => setBusy(id, false));
+  };
+
+  const remove = (id) => {
+    const enquiry = enquiries.find((e) => e.id === id);
+    if (!enquiry || saving.has(id)) return;
+    setSaveError(null);
+    if (!useApi) return setEnquiries((prev) => prev.filter((e) => e.id !== id));
+    setBusy(id, true);
+    deleteEnquiry(id)
+      .then(() => setEnquiries((prev) => prev.filter((e) => e.id !== id)))
+      .catch((err) => setSaveError(`Could not delete the enquiry from ${enquiry.name}. ${err.message}`))
+      .finally(() => setBusy(id, false));
+  };
+
+  const counts = { new: 0, contacted: 0, closed: 0 };
+  enquiries.forEach((e) => { if (e.status in counts) counts[e.status] += 1; });
+  const visible = enquiries.filter((e) => (filter === "all" ? true : filter === "open" ? e.status !== "closed" : e.status === filter));
+
+  return (
+    <div style={{ background: C.paper }} className="w-full min-h-[calc(100vh-4rem)]">
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 sm:py-12">
+        <div className="mb-8">
+          <div style={{ color: C.orangeDeep }} className="f-mono text-xs font-semibold tracking-wider uppercase mb-1">Website Leads</div>
+          <h1 style={{ color: C.ink }} className="f-display text-2xl sm:text-3xl font-bold">Enquiries</h1>
+          <p style={{ color: C.steel }} className="f-body text-sm mt-1">Messages sent from the contact form on the website.</p>
+        </div>
+
+        {load.state === "loading" && (
+          <div style={{ borderColor: C.line, color: C.steel, background: C.card }} className="border rounded-md p-10 text-center f-body text-sm">
+            Loading enquiries…
+          </div>
+        )}
+
+        {load.state === "error" && (
+          <div style={{ borderColor: C.orangeDeep, background: "#FDF0EA" }} className="border rounded-md p-6 text-center">
+            <p style={{ color: C.orangeDeep }} className="f-body text-sm mb-3">Could not load enquiries. {load.message}</p>
+            <button onClick={retry} style={{ background: C.navy, color: C.paper }} className="f-body text-xs font-semibold px-4 py-2 rounded shadow-sm hover:opacity-90">
+              Retry
+            </button>
+          </div>
+        )}
+
+        {load.state === "ready" && (<>
+          {saveError && (
+            <div role="alert" style={{ borderColor: C.orangeDeep, background: "#FDF0EA", color: C.orangeDeep }} className="border rounded-md px-4 py-3 mb-4 f-body text-sm flex items-start justify-between gap-3">
+              <span>{saveError}</span>
+              <button onClick={() => setSaveError(null)} aria-label="Dismiss" className="shrink-0"><X size={16} /></button>
+            </div>
+          )}
+
+          <div className="flex items-center gap-2 mb-6 overflow-x-auto pb-2 no-scrollbar">
+            {[
+              { id: "open", label: `Open (${counts.new + counts.contacted})` },
+              { id: "new", label: `New (${counts.new})` },
+              { id: "contacted", label: `Contacted (${counts.contacted})` },
+              { id: "closed", label: `Closed (${counts.closed})` },
+              { id: "all", label: `All (${enquiries.length})` },
+            ].map((f) => (
+              <button
+                key={f.id}
+                onClick={() => setFilter(f.id)}
+                style={{ background: filter === f.id ? C.navy : C.card, color: filter === f.id ? C.paper : C.ink, borderColor: C.line }}
+                className="f-body text-xs px-4 py-2 rounded border font-medium whitespace-nowrap shadow-sm shrink-0"
+              >
+                {f.label}
+              </button>
+            ))}
+          </div>
+
+          {visible.length === 0 ? (
+            <div style={{ borderColor: C.line, color: C.steel, background: C.card }} className="border border-dashed rounded-md p-10 text-center f-body text-sm">
+              {enquiries.length === 0 ? "No enquiries yet. They appear here when someone fills in the form on the website." : "No enquiries in this list."}
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+              {visible.map((e) => (
+                <EnquiryCard key={e.id} enquiry={e} busy={saving.has(e.id)} onStatus={changeStatus} onDelete={remove} />
+              ))}
+            </div>
+          )}
+        </>)}
+      </div>
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------------
+   TEAM (a profile for each person; the admin sets their passwords)
+------------------------------------------------------------------*/
+// canManage: the admin, who sets and removes passwords. Everyone else sees
+// the profile only. work is { open, done } for this person.
+function TeamMember({ employee, work, isYou, canManage, busy, onSet, onClear }) {
+  const [mode, setMode] = useState("idle"); // idle | setting | removing
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState(null);
+  const save = (e) => {
+    e.preventDefault();
+    const problem = personalPasswordError(password);
+    if (problem) return setError(problem);
+    setError(null);
+    onSet(employee.id, password)
+      .then(() => { setMode("idle"); setPassword(""); })
+      .catch((err) => setError(err.message));
+  };
+  const remove = () => onClear(employee.id).then(() => setMode("idle")).catch((err) => setError(err.message));
+  const smallBtn = "f-body text-xs font-semibold px-3 py-2 rounded disabled:opacity-50";
+  const knowsPassword = typeof employee.hasPassword === "boolean";
+
+  return (
+    <div data-testid="team-member" style={{ background: C.card, borderColor: C.line }} className="border rounded-md p-4 shadow-sm">
+      <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+        <div className="flex items-center gap-3 flex-1 min-w-0">
+        <div style={{ background: C.navy, color: C.paper }} className="w-10 h-10 rounded-full flex items-center justify-center f-mono text-xs font-bold shrink-0">{employee.initials}</div>
+        <div className="min-w-0 flex-1">
+          <div style={{ color: C.ink }} className="f-body text-sm font-semibold">
+            {employee.name}{isYou && <span style={{ color: C.orangeDeep }} className="f-mono text-[10px] font-bold uppercase tracking-wider ml-2">You</span>}
+          </div>
+          <div style={{ color: C.steel }} className="f-body text-xs">{employee.role}</div>
+          <div data-testid="work-count" style={{ color: C.steel }} className="f-mono text-[11px] mt-1">{work.open} open · {work.done} completed</div>
+        </div>
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
+        {knowsPassword && (
+          <span data-testid="password-state" style={employee.hasPassword ? { background: "#EEF3ED", color: C.green } : { background: "#F1EFEA", color: C.steel }} className="f-mono text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded">
+            {employee.hasPassword ? "Can sign in" : "No password"}
+          </span>
+        )}
+        {canManage && mode === "idle" && (
+          <div className="flex items-center gap-2">
+            <button disabled={busy} onClick={() => { setMode("setting"); setError(null); }} style={{ background: C.navy, color: C.paper }} className={smallBtn}>
+              {employee.hasPassword ? "Change password" : "Set password"}
+            </button>
+            {employee.hasPassword && (
+              <button disabled={busy} onClick={() => { setMode("removing"); setError(null); }} style={{ borderColor: C.line, color: C.ink }} className={`${smallBtn} border bg-white`}>Remove</button>
+            )}
+          </div>
+        )}
+        </div>
+      </div>
+      {canManage && mode === "setting" && (
+        <form onSubmit={save} aria-label={`Password for ${employee.name}`} className="mt-3 flex flex-col sm:flex-row gap-2">
+          <input name="password" type="text" autoComplete="off" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="New password, at least 6 characters" style={{ borderColor: C.line, color: C.ink }} className={INPUT_CLASS} autoFocus />
+          <div className="flex gap-2 shrink-0">
+            <button type="submit" disabled={busy} style={{ background: C.orange, color: "#FFFFFF" }} className={smallBtn}>{busy ? "Saving…" : "Save"}</button>
+            <button type="button" onClick={() => { setMode("idle"); setPassword(""); setError(null); }} style={{ color: C.steel }} className={smallBtn}>Cancel</button>
+          </div>
+        </form>
+      )}
+      {canManage && mode === "removing" && (
+        <div className="mt-3 flex items-center gap-2 flex-wrap">
+          <span style={{ color: C.ink }} className="f-body text-sm">Remove {employee.name}'s password? They will be signed out.</span>
+          <button disabled={busy} onClick={remove} style={{ background: C.orangeDeep, color: "#FFFFFF" }} className={smallBtn}>Yes, remove</button>
+          <button onClick={() => setMode("idle")} style={{ color: C.steel }} className={smallBtn}>Keep</button>
+        </div>
+      )}
+      {error && <div role="alert" style={{ color: C.orangeDeep }} className="f-body text-xs mt-2">{error}</div>}
+    </div>
+  );
+}
+
+// Everyone signed in sees the profiles. Only the admin (viewer.isAdmin) sets
+// passwords. access is as on the Work Board.
+function Team({ viewer, access }) {
+  const [employees, setEmployees] = useState([]);
+  const [counts, setCounts] = useState({});
+  const [load, setLoad] = useState({ state: "loading" });
+  const [attempt, setAttempt] = useState(0);
+  const [saving, setSaving] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all([fetchEmployees(), fetchTasks()])
+      .then(([list, tasks]) => {
+        if (cancelled) return;
+        setEmployees(list);
+        setCounts(workCounts(tasks));
+        setLoad({ state: "ready" });
+      })
+      .catch((err) => { if (!cancelled) setLoad({ state: "error", message: err.message }); });
+    return () => { cancelled = true; };
+  }, [attempt]);
+
+  const mark = (id, hasPassword) => setEmployees((prev) => prev.map((e) => (e.id === id ? { ...e, hasPassword } : e)));
+  const busyWhile = async (id, work) => {
+    setSaving(id);
+    try { await work(); } finally { setSaving(null); }
+  };
+  const onSet = (id, password) => busyWhile(id, async () => { await setEmployeePassword(id, password); mark(id, true); });
+  const onClear = (id) => busyWhile(id, async () => { await clearEmployeePassword(id); mark(id, false); });
+
+  return (
+    <div style={{ background: C.paper }} className="w-full min-h-[calc(100vh-4rem)]">
+      <div className="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8 py-8 sm:py-12">
+        <div style={{ color: C.orangeDeep }} className="f-mono text-xs font-semibold tracking-wider uppercase mb-1">Team</div>
+        <h1 style={{ color: C.ink }} className="f-display text-2xl sm:text-3xl font-bold flex items-center gap-2"><UserRound size={24} /> Team profiles</h1>
+        <p style={{ color: C.steel }} className="f-body text-sm mt-1 mb-6">
+          {viewer.isAdmin
+            ? "Each person has a profile. Give them a password here and tell them in person. They then pick their name on the sign-in screen and can update and move the work assigned to them."
+            : "Each person has a profile. Once the admin gives you a password, pick your name on the sign-in screen to update and move the work assigned to you."}
+        </p>
+        {!viewer.isAdmin && (
+          <AccessNote testId="team-access" icon={Eye} title="Only the admin can set or change passwords" actionLabel={viewer.employeeId ? undefined : "Switch sign-in"} onAction={viewer.employeeId ? undefined : access?.onSwitchSignIn}>
+            <div>Sign in with the admin password to manage these profiles.</div>
+            {access && !access.adminConfigured && (
+              <div data-testid="no-admin-note" style={{ color: C.orangeDeep }} className="font-semibold mt-1">
+                No admin password is set on the server yet. Add ADMIN_PASSWORD in the Render dashboard first.
+              </div>
+            )}
+          </AccessNote>
+        )}
+        {load.state === "loading" && <div style={{ borderColor: C.line, color: C.steel, background: C.card }} className="border rounded-md p-10 text-center f-body text-sm">Loading team…</div>}
+        {load.state === "error" && (
+          <div style={{ borderColor: C.orangeDeep, background: "#FDF0EA" }} className="border rounded-md p-6 text-center">
+            <p style={{ color: C.orangeDeep }} className="f-body text-sm mb-3">Could not load the team. {load.message}</p>
+            <button onClick={() => { setLoad({ state: "loading" }); setAttempt((a) => a + 1); }} style={{ background: C.navy, color: C.paper }} className="f-body text-xs font-semibold px-4 py-2 rounded shadow-sm hover:opacity-90">Retry</button>
+          </div>
+        )}
+        {load.state === "ready" && (
+          <div className="space-y-3">
+            {employees.map((e) => (
+              <TeamMember
+                key={e.id}
+                employee={e}
+                work={counts[e.id] ?? { open: 0, done: 0 }}
+                isYou={viewer.employeeId === e.id}
+                canManage={viewer.isAdmin}
+                busy={saving === e.id}
+                onSet={onSet}
+                onClear={onClear}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------------
+   STAFF SIGN-IN
+------------------------------------------------------------------*/
+// Whether the staff pages may be shown: "open" (no API, or the server has no
+// password set), "checking", "login", "signedIn" or "error".
+const SIGNED_OUT = { role: "staff", employeeId: null, name: null };
+
+function useStaffSession() {
+  const useApi = hasApi();
+  const signedOut = SIGNED_OUT;
+  // role is "admin" or "staff"; employeeId and name are set for a personal
+  // sign-in; people are offered on the sign-in screen. Without an API there is
+  // no sign-in and everything shows.
+  const [session, setSession] = useState(
+    useApi
+      ? { state: "checking", ...signedOut, people: [], methods: { admin: true, office: true } }
+      : { state: "open", role: "admin", employeeId: null, name: null, people: [], methods: { admin: true, office: true } }
+  );
+  const [attempt, setAttempt] = useState(0);
+
+  useEffect(() => {
+    if (!useApi) return undefined;
+    let cancelled = false;
+    fetchSession()
+      .then((found) => { if (!cancelled) setSession(found); })
+      .catch((err) => { if (!cancelled) setSession({ state: "error", ...signedOut, people: [], methods: { admin: true, office: true }, message: err.message }); });
+    // Signed out by the server: ask again, so the sign-in screen has the
+    // current list of people.
+    const stopListening = onAuthLost(() => {
+      setSession((prev) => ({ ...prev, state: "checking", ...signedOut }));
+      setAttempt((a) => a + 1);
+    });
+    return () => { cancelled = true; stopListening(); };
+  }, [useApi, attempt, signedOut]);
+
+  return {
+    session,
+    isAdmin: session.role === "admin",
+    viewer: { isAdmin: session.role === "admin", employeeId: session.employeeId },
+    signIn: async (password, as) => { await login(password, as); setSession(await fetchSession()); },
+    // Reloads the session so the sign-in screen lists whoever was given a
+    // password since this browser last checked.
+    signOut: () => {
+      logout();
+      setSession((prev) => ({ ...prev, state: "checking", ...signedOut }));
+      setAttempt((a) => a + 1);
+    },
+    retry: () => { setSession((prev) => ({ ...prev, state: "checking" })); setAttempt((a) => a + 1); },
+  };
+}
+
+const SIGN_IN_AS_KEY = "nk.signInAs";
+const rememberedChoice = () => { try { return localStorage.getItem(SIGN_IN_AS_KEY); } catch { return null; } };
+
+// methods: which shared passwords exist on the server. people: every profile,
+// with hasPassword false until the admin sets one.
+function SignIn({ people, methods, onSignIn }) {
+  const choices = signInChoices(people, methods);
+  const [as, setAs] = useState(() => defaultSignInChoice(people, rememberedChoice()));
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const chosen = choices.find((c) => c.value === as) ?? choices[0];
+  const noteStyle = { borderColor: C.blueLight, background: "#EBF3FA", color: C.ink };
+
+  const submit = (e) => {
+    e.preventDefault();
+    if (!chosen.ready) return;
+    setBusy(true);
+    setError(null);
+    try { localStorage.setItem(SIGN_IN_AS_KEY, chosen.value); } catch { /* storage blocked */ }
+    onSignIn(password, chosen.value).catch((err) => { setError(err.message); setBusy(false); });
+  };
+
+  return (
+    <form onSubmit={submit} aria-label="Staff sign in" style={{ background: C.card, borderColor: C.line }} className="w-full max-w-sm border rounded-lg shadow-sm p-6">
+      <div style={{ background: C.navy, color: C.orange }} className="w-11 h-11 rounded-full flex items-center justify-center mb-4">
+        <Lock size={18} />
+      </div>
+      <div style={{ color: C.orangeDeep }} className="f-mono text-xs font-semibold tracking-wider uppercase mb-1">Staff Only</div>
+      <h1 style={{ color: C.ink }} className="f-display text-xl font-bold mb-1">Sign in to continue</h1>
+      <p style={{ color: C.steel }} className="f-body text-sm mb-5">The work board and receivables are for NK Consultancy staff.</p>
+      <div className="mb-3">
+        <Field label="Sign in as" required>
+          <select name="as" value={chosen.value} onChange={(e) => { setAs(e.target.value); setError(null); }} style={{ borderColor: C.line, color: C.ink }} className={INPUT_CLASS}>
+            {choices.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
+          </select>
+        </Field>
+        {chosen.value === "shared" && methods.admin && methods.office && (
+          <p style={{ color: C.steel }} className="f-body text-xs mt-1.5">The admin password manages all work and shows amounts. The office password can only view.</p>
+        )}
+      </div>
+      {chosen.ready ? (
+        <Field label="Password" required>
+          <input
+            name="password" type="password" autoComplete="current-password" value={password}
+            onChange={(e) => setPassword(e.target.value)} required autoFocus
+            style={{ borderColor: C.line, color: C.ink }} className={INPUT_CLASS}
+          />
+        </Field>
+      ) : (
+        <div data-testid="no-password-note" role="note" style={noteStyle} className="border rounded-md px-3 py-2 f-body text-sm">
+          {chosen.name} does not have a password yet. The admin sets it on the Team page, and then {chosen.name} can sign in here.
+        </div>
+      )}
+      {!methods.admin && (
+        <div data-testid="no-admin-note" role="note" style={{ borderColor: C.orangeDeep, background: "#FDF0EA", color: C.orangeDeep }} className="border rounded-md px-3 py-2 mt-3 f-body text-sm">
+          No admin password is set on the server yet, so nobody can add or move work, set up profiles or see amounts. Add ADMIN_PASSWORD in the Render dashboard.
+        </div>
+      )}
+      {error && (
+        <div role="alert" style={{ borderColor: C.orangeDeep, background: "#FDF0EA", color: C.orangeDeep }} className="border rounded-md px-3 py-2 mt-3 f-body text-sm">
+          {error}
+        </div>
+      )}
+      <button type="submit" disabled={busy || !chosen.ready} style={{ background: C.orange, color: C.paper }} className="f-body text-sm font-semibold w-full px-5 py-2.5 mt-4 rounded shadow-sm hover:opacity-90 disabled:opacity-60">
+        {busy ? "Signing in…" : "Sign in"}
+      </button>
+    </form>
+  );
+}
+
+// Shows its children only when the staff session allows it.
+function StaffOnly({ staff, children }) {
+  const { session, signIn, retry } = staff;
+  if (session.state === "open" || session.state === "signedIn") return children;
+
+  return (
+    <div style={{ background: C.paper }} className="min-h-[calc(100vh-4rem)] grid-bg py-10 sm:py-16 px-4 flex items-start justify-center">
+      {session.state === "login" && <SignIn people={session.people} methods={session.methods} onSignIn={signIn} />}
+      {session.state === "checking" && (
+        <div style={{ borderColor: C.line, color: C.steel, background: C.card }} className="w-full max-w-sm border rounded-md p-8 text-center f-body text-sm">
+          Checking access…
+          <div className="text-xs mt-2">The server can take up to a minute to wake up.</div>
+        </div>
+      )}
+      {session.state === "error" && (
+        <div style={{ borderColor: C.orangeDeep, background: "#FDF0EA" }} className="w-full max-w-sm border rounded-md p-6 text-center">
+          <p style={{ color: C.orangeDeep }} className="f-body text-sm mb-3">Could not check access. {session.message}</p>
+          <button onClick={retry} style={{ background: C.navy, color: C.paper }} className="f-body text-xs font-semibold px-4 py-2 rounded shadow-sm hover:opacity-90">
+            Retry
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -990,14 +2078,64 @@ function Payments() {
    MAIN APP EXPORT
 ------------------------------------------------------------------*/
 export default function App() {
-  const [page, setPage] = useState("home");
+  // The page comes from the address, so back, forward and shared links work.
+  const [page, setPageState] = useState(() => pageFromHash(window.location.hash));
+  useEffect(() => {
+    const onHashChange = () => {
+      const next = pageFromHash(window.location.hash);
+      setPageState(next);
+      // A page starts at the top; a section link scrolls to its section once
+      // the landing page has drawn.
+      const anchor = anchorFromHash(window.location.hash);
+      if (anchor) requestAnimationFrame(() => document.getElementById(anchor)?.scrollIntoView());
+      else window.scrollTo(0, 0);
+    };
+    window.addEventListener("hashchange", onHashChange);
+    return () => window.removeEventListener("hashchange", onHashChange);
+  }, []);
+  // Opening the site at a section link such as #enquiry: scroll there once
+  // the landing page has drawn.
+  useEffect(() => {
+    const anchor = anchorFromHash(window.location.hash);
+    if (anchor) document.getElementById(anchor)?.scrollIntoView();
+  }, []);
+  const setPage = (next) => {
+    if (pageFromHash(window.location.hash) === next && !anchorFromHash(window.location.hash)) {
+      window.scrollTo(0, 0);
+      return;
+    }
+    window.location.hash = hashForPage(next);
+  };
+  const staff = useStaffSession();
+  const signedIn = staff.session.state === "signedIn";
+  // With sign-in on, the pages can explain hidden buttons and offer the fix.
+  const access = signedIn
+    ? { adminConfigured: staff.session.methods.admin, onSwitchSignIn: staff.signOut, onOpenTeam: () => setPage("team") }
+    : null;
+  // Mock mode only: enquiries live here so the landing page form and the
+  // Enquiries page share one list.
+  const [localEnquiries, setLocalEnquiries] = useState(INITIAL_ENQUIRIES);
+  const sendLocalEnquiry = async (form) => {
+    setLocalEnquiries((prev) => [
+      { id: Math.max(0, ...prev.map((e) => e.id)) + 1, name: form.name.trim(), phone: form.phone.trim(), message: form.message.trim() || null, status: "new", createdAt: localDay() },
+      ...prev,
+    ]);
+  };
   return (
     <div className="f-body w-full min-h-screen antialiased" style={{ background: C.paper }}>
-      <TopNav page={page} setPage={setPage} />
+      <TopNav
+        page={page}
+        setPage={setPage}
+        onSignOut={signedIn ? staff.signOut : null}
+        userName={signedIn ? viewerLabel(staff.session) : null}
+        showTeam={hasApi() && (signedIn || staff.session.state === "open")}
+      />
       <main>
-        {page === "home" && <Landing setPage={setPage} />}
-        {page === "work" && <WorkBoard />}
-        {page === "payments" && <Payments />}
+        {page === "home" && <Landing setPage={setPage} onEnquiry={hasApi() ? sendEnquiry : sendLocalEnquiry} />}
+        {page === "work" && <StaffOnly staff={staff}><WorkBoard key={`${staff.session.role}-${staff.session.employeeId}`} viewer={staff.viewer} access={access} /></StaffOnly>}
+        {page === "payments" && <StaffOnly staff={staff}><Payments key={staff.session.role} isAdmin={staff.isAdmin} /></StaffOnly>}
+        {page === "team" && <StaffOnly staff={staff}><Team key={`${staff.session.role}-${staff.session.employeeId}`} viewer={staff.viewer} access={access} /></StaffOnly>}
+        {page === "enquiries" && <StaffOnly staff={staff}><Enquiries local={localEnquiries} setLocal={setLocalEnquiries} /></StaffOnly>}
       </main>
     </div>
   );
