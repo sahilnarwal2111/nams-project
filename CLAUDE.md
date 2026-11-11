@@ -9,7 +9,7 @@ Website and internal tools for a civil-engineering consultancy ("NK Consultancy"
 - `apps/frontend` — Vite + React 19 single-page site (marketing landing page, a Work Board kanban, and a Payments receivables tracker). Deployed on Vercel from `main`.
 - `apps/backend` — Express 5 + Prisma API over Postgres 16. Not deployed anywhere yet.
 
-**Current state:** the frontend still runs entirely on hard-coded mock data in `App.jsx` and does not call the API. Wiring the two together is the main open piece of work.
+**Current state:** the Work Board uses the API (tasks, employees, saving status moves) when `VITE_API_URL` is set, and falls back to the mock data in `App.jsx` when it is not (as on Vercel today). The landing page team section and the Payments page still use mock data and do not call the API yet.
 
 ## Commands (run from the repo root)
 
@@ -22,6 +22,8 @@ npm run dev:backend         # API on http://localhost:4000 (needs Postgres, see 
 npm run lint                # ESLint on both apps
 npm run build:frontend      # production build to apps/frontend/dist
 npm run test:backend        # migrate + seed + API tests (needs Postgres)
+npm run test:frontend       # node:test unit tests for src/api.js (no Postgres needed)
+npm test                    # backend + frontend tests
 npm run check               # lint + build + tests — must pass before any PR
 
 npm run prisma:migrate      # create a migration after editing schema.prisma
@@ -41,7 +43,11 @@ Node 24 on the host; no Docker required. The backend needs a Postgres 16 databas
 
 ## Frontend architecture
 
-Everything lives in `apps/frontend/src/App.jsx` (~590 lines), top to bottom:
+API access lives in `apps/frontend/src/api.js`: `hasApi()` (true when `import.meta.env.VITE_API_URL` is set; see `apps/frontend/.env.example`), `fetchEmployees`, `fetchTasks`, `updateTaskStatus`, and small pure converters (`taskFromApi`: `assigneeId` → `assignee`, etc.). Non-2xx responses throw an `Error` with a readable message. The converters are tested in `apps/frontend/test/api.test.js` with `node:test`. Keep conversions pure and in `api.js`.
+
+The Work Board in API mode shows a loading state, an error with Retry if the load fails (never a silent mock fallback), moves cards optimistically, and rolls back with an error banner if the `PATCH` fails. Without `VITE_API_URL` it behaves as before on the mock data.
+
+Everything else lives in `apps/frontend/src/App.jsx` (~650 lines), top to bottom:
 
 1. `C` — design-token object of hex colors used via inline `style={{ }}` for brand colors, layered with Tailwind utility classes for layout and spacing. Brand colors go through `C`, everything else through Tailwind. Keep that split.
 2. Mock data (`SERVICES`, `EMPLOYEES`, `INITIAL_TASKS`, `INITIAL_CLIENTS`) and `*_META` lookups (`STATUS_META`, `PRIORITY_META`, `PAY_STATUS_META`) mapping enum values to label/color. These literal enum values are the contract with the API — see below.
