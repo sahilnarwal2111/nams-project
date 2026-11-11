@@ -66,6 +66,28 @@ export const sortReceivables = (tasks) => [...tasks].sort((a, b) => number(b.id)
 
 const digits = (value) => String(value ?? "").replace(/[,\s₹]/g, "");
 
+/* ---- typing an amount: commas the Indian way (1,25,000; 1,00,00,000) ----- */
+
+// What an amount field shows for what was typed: digits only, grouped in
+// thousands, lakhs and crores. Anything that is not a digit is dropped.
+export function formatRupeesTyped(text) {
+  const typed = String(text ?? "").replace(/\D/g, "").slice(0, 12);
+  if (typed === "") return "";
+  return Number(typed).toLocaleString("en-IN");
+}
+
+// Where the cursor belongs after formatting: behind the same number of digits
+// as before, so typing in the middle of an amount does not jump to the end.
+export function caretAfterFormat(raw, caret, formatted) {
+  const before = raw.slice(0, caret).replace(/\D/g, "").replace(/^0+(?=\d)/, "").length;
+  if (before === 0) return 0;
+  let seen = 0;
+  for (let i = 0; i < formatted.length; i++) {
+    if (/\d/.test(formatted[i]) && ++seen === before) return i + 1;
+  }
+  return formatted.length;
+}
+
 // The amount-to-charge field: blank means "not decided yet" (null).
 // Returns { fee } or { error }. received is what has already been recorded.
 export function parseFee(value, received = 0) {

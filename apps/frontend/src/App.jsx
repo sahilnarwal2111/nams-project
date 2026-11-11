@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, useRef, useLayoutEffect } from "react";
 import {
   hasApi, fetchEmployees, fetchTasks, updateTaskStatus, localDay,
   createTask, updateTask, deleteTask, taskFromForm, nextLocalTaskId,
@@ -15,7 +15,7 @@ import {
 import { pageFromHash, hashForPage, anchorFromHash } from "./route.js";
 import {
   PAYMENT_LABELS, RECEIVABLE_FILTERS, balanceOf, filterReceivables, receivableCounts, receivableTotals, sortReceivables,
-  parseFee, paymentError, withStatus, applyPayment, removeLocalPayment,
+  parseFee, paymentError, withStatus, applyPayment, removeLocalPayment, formatRupeesTyped, caretAfterFormat,
 } from "./receivables.js";
 import { KIND_FILTERS, kindLabel, actorFilters, groupByDay, changeRows, deviceLabel, dayOf, dayLabel, timeLabel } from "./activity.js";
 import {
@@ -701,6 +701,26 @@ function Field({ label, required, children }) {
   );
 }
 
+// A rupee amount field that shows commas the Indian way as it is typed
+// (1,25,000). onChange gets the formatted text. The cursor is put back behind
+// the digit just typed, so editing the middle of an amount works.
+function RupeeInput({ value, onChange, ...rest }) {
+  const ref = useRef(null);
+  const caret = useRef(null);
+  useLayoutEffect(() => {
+    if (caret.current !== null && ref.current && document.activeElement === ref.current) {
+      ref.current.setSelectionRange(caret.current, caret.current);
+    }
+    caret.current = null;
+  });
+  const change = (e) => {
+    const formatted = formatRupeesTyped(e.target.value);
+    caret.current = caretAfterFormat(e.target.value, e.target.selectionStart ?? e.target.value.length, formatted);
+    onChange(formatted);
+  };
+  return <input ref={ref} inputMode="numeric" autoComplete="off" value={value} onChange={change} {...rest} />;
+}
+
 // Create (task = null) or edit a work item. onSave and onDelete return promises;
 // a rejection is shown in the form and the form stays open.
 // Anyone can add work for anyone. Only an admin may reassign or delete existing
@@ -713,7 +733,7 @@ function WorkForm({ task, employees, onSave, onDelete, onClose, isAdmin = true, 
       ? Object.fromEntries(Object.keys(EMPTY_WORK).map((k) => [k, task[k] ?? EMPTY_WORK[k]]))
       : {}),
     // Only the admin's form has the amount to charge; blank means not decided.
-    ...(isAdmin ? { fee: task?.fee === null || task?.fee === undefined ? "" : String(task.fee) } : {}),
+    ...(isAdmin ? { fee: formatRupeesTyped(task?.fee) } : {}),
   }));
   const { busy, error, setError, run } = useDialogAction(onClose);
 
@@ -808,7 +828,7 @@ function WorkForm({ task, employees, onSave, onDelete, onClose, isAdmin = true, 
           {isAdmin && (
             <div className="sm:col-span-2">
               <Field label="Amount to charge (₹)">
-                <input name="fee" inputMode="numeric" value={form.fee} onChange={set("fee")} style={line} className={INPUT_CLASS} placeholder="Leave blank if not decided yet" />
+                <RupeeInput name="fee" value={form.fee} onChange={(fee) => setForm((f) => ({ ...f, fee }))} style={line} className={INPUT_CLASS} placeholder="Leave blank if not decided yet" />
               </Field>
               <p style={{ color: C.steel }} className="f-body text-xs mt-1">Shown to the admin only. Payments are recorded against it in Receivables.</p>
             </div>
@@ -1311,7 +1331,7 @@ function TicketLine({ task }) {
 
 // Set or change the amount to charge for a ticket. onSave returns a promise.
 function AmountForm({ task, onSave, onClose }) {
-  const [value, setValue] = useState(task.fee === null || task.fee === undefined ? "" : String(task.fee));
+  const [value, setValue] = useState(formatRupeesTyped(task.fee));
   const { busy, error, setError, run } = useDialogAction(onClose);
   const received = task.received ?? 0;
 
@@ -1327,7 +1347,7 @@ function AmountForm({ task, onSave, onClose }) {
       <div className="p-5 grid grid-cols-1 gap-4">
         <TicketLine task={task} />
         <Field label="Amount to charge (₹)">
-          <input name="fee" inputMode="numeric" value={value} onChange={(e) => setValue(e.target.value)} autoFocus style={{ borderColor: C.line, color: C.ink }} className={INPUT_CLASS} />
+          <RupeeInput name="fee" value={value} onChange={setValue} autoFocus style={{ borderColor: C.line, color: C.ink }} className={INPUT_CLASS} />
         </Field>
         <p style={{ color: C.steel }} className="f-body text-xs -mt-2">
           {received > 0
@@ -1365,7 +1385,7 @@ function PaymentForm({ task, onSave, onClose }) {
           <span style={{ color: C.orangeDeep }} className="f-display text-lg font-bold">{fmtINR(due)}</span>
         </div>
         <Field label="Amount received (₹)" required>
-          <input name="amount" inputMode="numeric" value={amount} onChange={(e) => setAmount(e.target.value)} required autoFocus style={{ borderColor: C.line, color: C.ink }} className={INPUT_CLASS} />
+          <RupeeInput name="amount" value={amount} onChange={setAmount} required autoFocus style={{ borderColor: C.line, color: C.ink }} className={INPUT_CLASS} />
         </Field>
         {remaining !== null && paid > 0 && (
           <p data-testid="remaining" style={{ color: remaining === 0 ? C.green : C.steel }} className="f-body text-sm -mt-2">

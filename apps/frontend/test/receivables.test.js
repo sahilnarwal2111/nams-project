@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {
   PAYMENT_STATUSES, PAYMENT_LABELS, paymentStatusOf, balanceOf, isPending, RECEIVABLE_FILTERS,
   filterReceivables, receivableCounts, receivableTotals, sortReceivables, parseFee, paymentError,
-  withStatus, applyPayment, removeLocalPayment,
+  withStatus, applyPayment, removeLocalPayment, formatRupeesTyped, caretAfterFormat,
 } from "../src/receivables.js";
 
 const t = (id, fee, received = 0) => withStatus({ id, fee, received });
@@ -85,4 +85,38 @@ test("mock mode: a part payment, the rest, and taking one back keep the status i
   assert.equal(removeLocalPayment(task, 99), task, "an unknown payment changes nothing");
   task = removeLocalPayment(task, 2);
   assert.deepEqual([task.received, task.paymentStatus], [0, "unpaid"]);
+});
+
+test("amounts are shown with commas the Indian way as they are typed", () => {
+  assert.equal(formatRupeesTyped(""), "");
+  assert.equal(formatRupeesTyped("5"), "5");
+  assert.equal(formatRupeesTyped("999"), "999");
+  assert.equal(formatRupeesTyped("1000"), "1,000");
+  assert.equal(formatRupeesTyped("50000"), "50,000");
+  assert.equal(formatRupeesTyped("125000"), "1,25,000");
+  assert.equal(formatRupeesTyped("1,25,0000"), "12,50,000", "retyped with the old commas still in place");
+  assert.equal(formatRupeesTyped("10000000"), "1,00,00,000");
+  assert.equal(formatRupeesTyped("1234567890"), "1,23,45,67,890");
+  assert.equal(formatRupeesTyped("0"), "0", "0 means not charged");
+  assert.equal(formatRupeesTyped("007"), "7");
+  assert.equal(formatRupeesTyped("₹ 12a3.4"), "1,234", "only digits are kept");
+  assert.equal(formatRupeesTyped("abc"), "");
+  assert.equal(formatRupeesTyped(40000), "40,000");
+  // What the field shows is what the checks read back.
+  assert.deepEqual(parseFee(formatRupeesTyped("12500000")), { fee: 12500000 });
+  assert.equal(paymentError({ fee: 200000, received: 0 }, formatRupeesTyped("150000")), null);
+});
+
+test("the cursor stays behind the digit just typed", () => {
+  // "1,000" with 5 typed at the end
+  assert.equal(caretAfterFormat("1,0005", 6, "10,005"), 6);
+  // "50,000" with 1 typed at the very start: "150,000" -> "1,50,000"
+  assert.equal(caretAfterFormat("150,000", 1, "1,50,000"), 1);
+  // "1,50,000" with 9 typed after the 5: "1,590,000" -> "15,90,000", cursor after the 9
+  assert.equal(caretAfterFormat("1,590,000", 4, "15,90,000"), 4);
+  // deleting the first digit of "1,25,000" leaves ",25,000" -> "25,000", cursor at the start
+  assert.equal(caretAfterFormat(",25,000", 0, "25,000"), 0);
+  // a letter typed in the middle is dropped and the cursor does not move past digits
+  assert.equal(caretAfterFormat("12x,500", 3, "12,500"), 2);
+  assert.equal(caretAfterFormat("", 0, ""), 0);
 });
