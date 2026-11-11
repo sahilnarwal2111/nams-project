@@ -464,3 +464,21 @@ test("POST /api/clients returns 400 for invalid values", async () => {
   }
   assert.equal(await clientCount(), n);
 });
+
+test("DELETE /api/clients/:id removes a client and returns 204 with no body", async () => {
+  await withCreatedClient(validClient, async (_res, created) => {
+    const res = await fetch(`${base}/api/clients/${created.id}`, { method: "DELETE" });
+    assert.equal(res.status, 204);
+    assert.equal(await res.text(), "");
+    const list = await (await get("/api/clients")).json();
+    assert.ok(!list.some((c) => c.id === created.id));
+  });
+});
+
+test("DELETE /api/clients/:id returns 404 for an unknown client", async () => {
+  const n = await clientCount();
+  const res = await fetch(`${base}/api/clients/c9999`, { method: "DELETE" });
+  assert.equal(res.status, 404);
+  assert.match((await res.json()).error, /c9999/);
+  assert.equal(await clientCount(), n);
+});
