@@ -12,7 +12,46 @@ export const hasApi = () => API_URL !== "";
 
 export function taskFromApi(t) {
   const { assigneeId, ...rest } = t;
+  const task = { ...rest, assignee: assigneeId };
+  // A calendar date with no time: keep its UTC day (see dateFromApi).
+  if ("expectedCompletion" in task) task.expectedCompletion = dateFromApi(task.expectedCompletion);
+  return task;
+}
+
+const blankToNull = (v) => (typeof v === "string" && v.trim() !== "" ? v.trim() : null);
+
+// The work form's values -> body for POST /api/tasks and PATCH /api/tasks/:id.
+// Blank optional fields are sent as null, which clears them.
+export function taskToApi(form) {
+  return {
+    title: (form.title ?? "").trim(),
+    client: (form.client ?? "").trim(),
+    assigneeId: form.assignee,
+    priority: form.priority,
+    customerPhone: blankToNull(form.customerPhone),
+    district: blankToNull(form.district),
+    department: blankToNull(form.department),
+    workTypes: Array.isArray(form.workTypes) ? form.workTypes : [],
+    details: blankToNull(form.details),
+    expectedCompletion: blankToNull(form.expectedCompletion),
+  };
+}
+
+// The same clean-up for mock mode, where there is no API to do it: the values
+// as the UI stores them.
+export function taskFromForm(form) {
+  const { assigneeId, ...rest } = taskToApi(form);
   return { ...rest, assignee: assigneeId };
+}
+
+// Next NK-### id for a task created in mock mode: highest number + 1.
+export function nextLocalTaskId(tasks) {
+  let max = 0;
+  for (const { id } of tasks) {
+    const m = /^NK-(\d+)$/.exec(id);
+    if (m) max = Math.max(max, Number(m[1]));
+  }
+  return `NK-${String(max + 1).padStart(3, "0")}`;
 }
 
 export function tasksFromApi(list) {
@@ -125,4 +164,18 @@ export async function updateTaskStatus(id, status) {
     body: JSON.stringify(statusPatchBody(status)),
   });
   return taskFromApi(updated);
+}
+
+export async function createTask(form) {
+  return taskFromApi(await request("/api/tasks", { method: "POST", body: JSON.stringify(taskToApi(form)) }));
+}
+
+export async function updateTask(id, form) {
+  return taskFromApi(
+    await request(`/api/tasks/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(taskToApi(form)) })
+  );
+}
+
+export async function deleteTask(id) {
+  await request(`/api/tasks/${encodeURIComponent(id)}`, { method: "DELETE" });
 }

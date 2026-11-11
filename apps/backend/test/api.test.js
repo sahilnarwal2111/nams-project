@@ -259,6 +259,108 @@ test("DELETE /api/tasks/:id returns 404 for an unknown task", async () => {
   assert.equal(await taskCount(), n);
 });
 
+const workDetails = {
+  customerPhone: " +91 98765 43210 ",
+  district: "Jind",
+  department: "PWD B&R",
+  workTypes: ["drawing", "survey"],
+  details: "Site visit on Monday",
+  expectedCompletion: "2026-12-15",
+};
+
+test("POST /api/tasks stores the optional work details", async () => {
+  let createdId;
+  try {
+    const res = await post("/api/tasks", { ...validTask, ...workDetails });
+    assert.equal(res.status, 201);
+    const task = await res.json();
+    createdId = task.id;
+    assert.equal(task.customerPhone, "+91 98765 43210");
+    assert.equal(task.district, "Jind");
+    assert.equal(task.department, "PWD B&R");
+    assert.deepEqual(task.workTypes, ["survey", "drawing"], "work types come back in a fixed order");
+    assert.equal(task.details, "Site visit on Monday");
+    assert.equal(task.expectedCompletion, "2026-12-15T00:00:00.000Z");
+    assert.deepEqual(await (await get(`/api/tasks/${task.id}`)).json(), task);
+  } finally {
+    if (createdId) await prisma.task.deleteMany({ where: { id: createdId } });
+  }
+});
+
+test("POST /api/tasks leaves the work details empty when they are not sent", async () => {
+  let createdId;
+  try {
+    const task = await (await post("/api/tasks", { ...validTask, district: "  ", details: null })).json();
+    createdId = task.id;
+    assert.equal(task.customerPhone, null);
+    assert.equal(task.district, null);
+    assert.equal(task.department, null);
+    assert.deepEqual(task.workTypes, []);
+    assert.equal(task.details, null);
+    assert.equal(task.expectedCompletion, null);
+  } finally {
+    if (createdId) await prisma.task.deleteMany({ where: { id: createdId } });
+  }
+});
+
+const badDetails = [
+  { customerPhone: 9876543210 },
+  { district: 5 },
+  { department: ["PWD"] },
+  { details: {} },
+  { workTypes: "survey" },
+  { workTypes: ["survey", "painting"] },
+  { expectedCompletion: "15/12/2026" },
+  { expectedCompletion: "2026-02-30" },
+  { expectedCompletion: 20261215 },
+];
+
+test("POST /api/tasks rejects invalid work details", async () => {
+  const n = await taskCount();
+  for (const bad of badDetails) {
+    const res = await post("/api/tasks", { ...validTask, ...bad });
+    assert.equal(res.status, 400, JSON.stringify(bad));
+    assert.match((await res.json()).error, new RegExp(Object.keys(bad)[0]));
+  }
+  assert.equal(await taskCount(), n, "a rejected request created a task");
+});
+
+test("PATCH /api/tasks/:id edits and clears the work details", async () => {
+  let createdId;
+  try {
+    const created = await (await post("/api/tasks", { ...validTask, ...workDetails })).json();
+    createdId = created.id;
+
+    const res = await patch(`/api/tasks/${created.id}`, {
+      district: "Kaithal",
+      workTypes: ["printout"],
+      expectedCompletion: null,
+      details: "",
+    });
+    assert.equal(res.status, 200);
+    const task = await res.json();
+    assert.equal(task.district, "Kaithal");
+    assert.deepEqual(task.workTypes, ["printout"]);
+    assert.equal(task.expectedCompletion, null);
+    assert.equal(task.details, null);
+    assert.equal(task.customerPhone, "+91 98765 43210", "fields not sent are left alone");
+    assert.equal(task.department, "PWD B&R");
+    assert.equal(task.title, validTask.title);
+    assert.equal(task.status, "todo");
+  } finally {
+    if (createdId) await prisma.task.deleteMany({ where: { id: createdId } });
+  }
+});
+
+test("PATCH /api/tasks/:id rejects invalid work details without changing the task", async () => {
+  const before = await (await get("/api/tasks/NK-102")).json();
+  for (const bad of badDetails) {
+    const res = await patch("/api/tasks/NK-102", { title: "Should not stick", ...bad });
+    assert.equal(res.status, 400, JSON.stringify(bad));
+  }
+  assert.deepEqual(await (await get("/api/tasks/NK-102")).json(), before);
+});
+
 test("GET /api/clients returns receivables with valid statuses", async () => {
   const res = await get("/api/clients");
   assert.equal(res.status, 200);

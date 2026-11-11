@@ -6,6 +6,9 @@ import {
   employeeFromApi,
   employeesFromApi,
   statusPatchBody,
+  taskToApi,
+  taskFromForm,
+  nextLocalTaskId,
   dateFromApi,
   instantFromApi,
   localDay,
@@ -128,4 +131,61 @@ test("clientsFromApi maps lists", () => {
 
 test("logCallPatchBody is empty", () => {
   assert.deepEqual(logCallPatchBody(), {});
+});
+
+const workForm = {
+  title: "  Pond survey ",
+  client: " Village XYZ Panchayat ",
+  customerPhone: " +91 98765 43210 ",
+  district: "Jind",
+  department: "   ",
+  workTypes: ["survey", "drawing"],
+  details: "",
+  expectedCompletion: "2026-12-15",
+  priority: "high",
+  assignee: "e6",
+};
+
+test("taskFromApi keeps the expected completion on its UTC day", () => {
+  const t = taskFromApi({ ...apiTask, expectedCompletion: "2026-12-15T00:00:00.000Z", workTypes: ["survey"] });
+  assert.equal(t.expectedCompletion, "2026-12-15");
+  assert.deepEqual(t.workTypes, ["survey"]);
+  assert.equal(taskFromApi({ ...apiTask, expectedCompletion: null }).expectedCompletion, null);
+  assert.equal("expectedCompletion" in taskFromApi(apiTask), false);
+});
+
+test("taskToApi trims text, renames assignee and sends blanks as null", () => {
+  assert.deepEqual(taskToApi(workForm), {
+    title: "Pond survey",
+    client: "Village XYZ Panchayat",
+    assigneeId: "e6",
+    priority: "high",
+    customerPhone: "+91 98765 43210",
+    district: "Jind",
+    department: null,
+    workTypes: ["survey", "drawing"],
+    details: null,
+    expectedCompletion: "2026-12-15",
+  });
+});
+
+test("taskToApi sends an empty date as null and never sends status or id", () => {
+  const body = taskToApi({ ...workForm, expectedCompletion: "", status: "done", id: "NK-1" });
+  assert.equal(body.expectedCompletion, null);
+  assert.equal("status" in body, false);
+  assert.equal("id" in body, false);
+});
+
+test("taskFromForm gives the UI shape for mock mode", () => {
+  const t = taskFromForm(workForm);
+  assert.equal(t.assignee, "e6");
+  assert.equal("assigneeId" in t, false);
+  assert.equal(t.title, "Pond survey");
+  assert.equal(t.department, null);
+});
+
+test("nextLocalTaskId continues the NK sequence numerically", () => {
+  assert.equal(nextLocalTaskId([]), "NK-001");
+  assert.equal(nextLocalTaskId([{ id: "NK-101" }, { id: "NK-126" }, { id: "NK-99" }]), "NK-127");
+  assert.equal(nextLocalTaskId([{ id: "NK-999" }, { id: "other" }]), "NK-1000");
 });
