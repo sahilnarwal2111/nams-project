@@ -6,6 +6,10 @@ import {
   employeeFromApi,
   employeesFromApi,
   statusPatchBody,
+  dateFromApi,
+  clientFromApi,
+  clientsFromApi,
+  logCallPatchBody,
 } from "../src/api.js";
 
 const apiTask = {
@@ -52,4 +56,53 @@ test("employeesFromApi maps lists", () => {
 
 test("statusPatchBody sends only status", () => {
   assert.deepEqual(statusPatchBody("inprogress"), { status: "inprogress" });
+});
+
+const apiClient = {
+  id: "c1",
+  name: "Jind Infra",
+  contact: "S",
+  phone: "1",
+  due: 184000,
+  invoiceDate: "2026-05-12T00:00:00.000Z",
+  lastCall: "2026-07-18T23:59:59.999Z",
+  status: "overdue",
+  notes: null,
+};
+
+test("dateFromApi converts ISO timestamps to YYYY-MM-DD", () => {
+  assert.equal(dateFromApi("2026-05-12T00:00:00.000Z"), "2026-05-12");
+  assert.equal(dateFromApi("2026-07-18T23:59:59.999Z"), "2026-07-18");
+  assert.equal(dateFromApi("2026-07-18T23:30:00-05:00"), "2026-07-19");
+});
+
+test("dateFromApi passes through short dates and unparseable values", () => {
+  assert.equal(dateFromApi("2026-05-12"), "2026-05-12");
+  assert.equal(dateFromApi("not a date"), "not a date");
+  assert.equal(dateFromApi(null), null);
+});
+
+test("clientFromApi converts both dates and keeps other fields", () => {
+  const c = clientFromApi(apiClient);
+  assert.equal(c.invoiceDate, "2026-05-12");
+  assert.equal(c.lastCall, "2026-07-18");
+  assert.equal(c.due, 184000);
+  assert.equal(c.status, "overdue");
+  assert.equal(c.notes, null);
+});
+
+test("clientFromApi does not mutate its input", () => {
+  const copy = structuredClone(apiClient);
+  clientFromApi(apiClient);
+  assert.deepEqual(apiClient, copy);
+});
+
+test("clientsFromApi maps lists", () => {
+  assert.deepEqual(clientsFromApi([]), []);
+  const out = clientsFromApi([apiClient, { ...apiClient, id: "c2", lastCall: "2026-08-01T10:00:00.000Z" }]);
+  assert.deepEqual(out.map((c) => c.lastCall), ["2026-07-18", "2026-08-01"]);
+});
+
+test("logCallPatchBody is empty", () => {
+  assert.deepEqual(logCallPatchBody(), {});
 });

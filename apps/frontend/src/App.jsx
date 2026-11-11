@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect } from "react";
-import { hasApi, fetchEmployees, fetchTasks, updateTaskStatus } from "./api.js";
+import { hasApi, fetchEmployees, fetchTasks, updateTaskStatus, fetchClients, logClientCall } from "./api.js";
 import {
   Ruler, Route, Building2, Droplets, Plane, Waves,
   Menu, X, ChevronRight, Clock, PhoneCall,
@@ -571,11 +571,49 @@ function ClientCard({ client, onCallLogged }) {
 }
 
 function Payments() {
-  const [clients, setClients] = useState(INITIAL_CLIENTS);
+  const useApi = hasApi();
+  const [clients, setClients] = useState(useApi ? [] : INITIAL_CLIENTS);
+  const [load, setLoad] = useState(useApi ? { state: "loading" } : { state: "ready" });
+  const [attempt, setAttempt] = useState(0);
+  const [saveError, setSaveError] = useState(null);
   const [filter, setFilter] = useState("all");
   const today = new Date().toISOString().slice(0, 10);
 
-  const logCall = (id) => setClients((prev) => prev.map((c) => (c.id === id ? { ...c, lastCall: today } : c)));
+  useEffect(() => {
+    if (!useApi) return undefined;
+    let cancelled = false;
+    fetchClients()
+      .then((list) => {
+        if (cancelled) return;
+        setClients(list);
+        setLoad({ state: "ready" });
+      })
+      .catch((err) => {
+        if (!cancelled) setLoad({ state: "error", message: err.message });
+      });
+    return () => { cancelled = true; };
+  }, [useApi, attempt]);
+
+  const retry = () => {
+    setLoad({ state: "loading" });
+    setAttempt((a) => a + 1);
+  };
+
+  const setLastCall = (id, lastCall) => setClients((prev) => prev.map((c) => (c.id === id ? { ...c, lastCall } : c)));
+
+  const logCall = (id) => {
+    const prevLastCall = clients.find((c) => c.id === id)?.lastCall;
+    if (prevLastCall === undefined) return;
+    setSaveError(null);
+    setLastCall(id, today);
+    if (!useApi) return;
+    logClientCall(id)
+      .then((updated) => setLastCall(id, updated.lastCall))
+      .catch((err) => {
+        setLastCall(id, prevLastCall);
+        setSaveError(`Could not save the reminder for ${id}; it was undone. ${err.message}`);
+      });
+  };
 
   const totalDue = clients.reduce((s, c) => s + c.due, 0);
   const overdueCount = clients.filter((c) => c.status === "overdue").length;
@@ -590,6 +628,33 @@ function Payments() {
           <div style={{ color: C.orangeDeep }} className="f-mono text-xs font-semibold tracking-wider uppercase mb-1">Financial Log</div>
           <h1 style={{ color: C.ink }} className="f-display text-2xl sm:text-3xl font-bold">Payment Receivables &amp; Follow-ups</h1>
         </div>
+
+        {load.state === "loading" && (
+          <div style={{ borderColor: C.line, color: C.steel, background: C.card }} className="border rounded-md p-10 text-center f-body text-sm">
+            Loading payments…
+          </div>
+        )}
+
+        {load.state === "error" && (
+          <div style={{ borderColor: C.orangeDeep, background: "#FDF0EA" }} className="border rounded-md p-6 text-center">
+            <p style={{ color: C.orangeDeep }} className="f-body text-sm mb-3">Could not load payments. {load.message}</p>
+            <button
+              onClick={retry}
+              style={{ background: C.navy, color: C.paper }}
+              className="f-body text-xs font-semibold px-4 py-2 rounded shadow-sm hover:opacity-90"
+            >
+              Retry
+            </button>
+          </div>
+        )}
+
+        {load.state === "ready" && (<>
+        {saveError && (
+          <div role="alert" style={{ borderColor: C.orangeDeep, background: "#FDF0EA", color: C.orangeDeep }} className="border rounded-md px-4 py-3 mb-4 f-body text-sm flex items-start justify-between gap-3">
+            <span>{saveError}</span>
+            <button onClick={() => setSaveError(null)} aria-label="Dismiss" className="shrink-0"><X size={16} /></button>
+          </div>
+        )}
 
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-8">
           <div style={{ background: C.navy }} className="rounded-md p-5 shadow-sm text-white">
@@ -635,6 +700,7 @@ function Payments() {
             <ClientCard key={c.id} client={c} onCallLogged={logCall} />
           ))}
         </div>
+        </>)}
       </div>
     </div>
   );
