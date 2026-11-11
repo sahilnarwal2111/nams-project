@@ -40,7 +40,7 @@ See [definitions, cohorts, windows, and gates](operational-metrics.md) and the [
 | Stock comparisons | Retain approved same-time aggregate snapshots | Not implemented; current rows cannot reconstruct historical stocks |
 | Deleted/reopened history | Use qualified retained/current-state labels; retain restatement caveats | No event ledger or audit-store change in this PR |
 | Sensitive financial output | Owner-approved admin audience and restricted database grants | Instructions provided; no production permissions or report audience verified |
-| Source validation | Synthetic PostgreSQL tests and independent read-only checks | See updated Test Report; not live ingestion or dashboard validation |
+| Source validation | Synthetic PostgreSQL tests and independent read-only checks | Executable coverage lives in `apps/backend/test/reporting.test.js`; not live ingestion or dashboard validation |
 
 Potential future work includes activity/transition history, deletion-safe receipt audit, and enquiry follow-up timestamps.
 Those require separate product, privacy, and instrumentation decisions. This PR does not implement them.

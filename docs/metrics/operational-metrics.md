@@ -61,7 +61,7 @@ Report fractions with both counts. Label denominators below 10 as **small sample
 | `overdue_open_tasks`, `overdue_dated_open_fraction` | Open tasks whose expected UTC date precedes local today; denominator is dated open tasks | Conditional schedule risk, not on-time completion |
 | `employee_records`, `employees_with_open_tasks`, `roster_with_open_tasks_fraction` | Roster count; distinct employees assigned open work; denominator is roster count | Assignment coverage, NOT adoption or utilization |
 | `client_records`, `balance_client_records` | All client rows; rows with positive due | Collection queue context, not unique legal entities |
-| `recorded_balance_inr` | Sum due across all clients, matching Payments | Outstanding balance, not revenue or cash received |
+| `recorded_balance_inr` | Sum due across all clients, matching the Receivables view; not reconciled with Payment rows | Outstanding balance, not revenue or cash received |
 | `overdue_balance_client_records`, `overdue_recorded_balance_inr`, `overdue_balance_fraction` | Positive-balance rows manually marked overdue; their balance sum; denominator is total recorded balance | Exposure; no contractual due date exists |
 | `balance_clients_latest_stamp_previous_day`, `latest_stamp_previous_day_fraction` | Current positive-balance rows with latest `lastCall` in last complete day; denominator is current positive-balance rows | Diagnostic only, NOT call counts or verified reminders |
 | `balance_clients_stamp_age_7d` | Current positive-balance rows with local lastCall date at least seven calendar days before today | Follow-up proxy; seven days is proposed, not an SLA |
@@ -202,7 +202,7 @@ psql -X "$REPORTING_DATABASE_URL" --set=ON_ERROR_STOP=1 \
   --file=apps/backend/reporting/run-operational-metrics.psql
 ```
 
-The wrapper uses read-only repeatable-read execution, a five-second statement limit, a one-second lock limit, and `pg_catalog, public` search path.
+The wrapper uses read-only repeatable-read execution, a five-second statement limit, a one-second lock limit, and `pg_catalog, public, pg_temp` search path.
 Use one connection and no concurrent runs. It creates no objects and performs no persistent writes.
 A timeout or missing table/column/permission is a failed report, not zero. Install and verify all source migrations first.
 Never run migration, seed, or test commands against production for reporting setup.

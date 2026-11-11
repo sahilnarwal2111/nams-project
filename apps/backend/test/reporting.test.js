@@ -199,6 +199,17 @@ test('timestamp flows expose legacy gaps and change when a task reopens or compl
     assert.equal((await report(tx)).flow_windows[0].currently_done_completion_records, 3);
     await tx.$executeRaw`UPDATE "Task" SET status = 'done', "completedAt" = '2026-11-10 18:35' WHERE id = 'on-time'`;
     assert.equal((await report(tx)).flow_windows[0].currently_done_completion_records, 3);
+    // Model an earlier completion, then reopening and recompletion the next day.
+    await tx.$executeRaw`UPDATE "Task" SET "completedAt" = '2026-11-08 19:00' WHERE id = 'late'`;
+    const earlierEpisode = await report(tx);
+    assert.equal(earlierEpisode.flow_windows[1].currently_done_completion_records, 1);
+    assert.equal(earlierEpisode.flow_windows[0].currently_done_completion_records, 2);
+    await tx.$executeRaw`UPDATE "Task" SET status = 'todo', "completedAt" = NULL WHERE id = 'late'`;
+    assert.equal((await report(tx)).flow_windows[1].currently_done_completion_records, 0);
+    await tx.$executeRaw`UPDATE "Task" SET status = 'done', "completedAt" = '2026-11-09 19:00' WHERE id = 'late'`;
+    const laterEpisode = await report(tx);
+    assert.equal(laterEpisode.flow_windows[1].currently_done_completion_records, 0);
+    assert.equal(laterEpisode.flow_windows[0].currently_done_completion_records, 3);
     await tx.$executeRawUnsafe("SET LOCAL TIME ZONE 'America/Los_Angeles'");
     assert.equal((await report(tx)).flow_windows[0].currently_done_completion_records, 3);
     assert.ok(!JSON.stringify(row.flow_windows).includes('PRIVATE'));
@@ -302,13 +313,13 @@ test('production SELECT executes in a read-only transaction with bounded wrapper
   assert.match(wrapper, /BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;/);
   assert.match(wrapper, /SET LOCAL statement_timeout = '5s';/);
   assert.match(wrapper, /SET LOCAL lock_timeout = '1s';/);
-  assert.match(wrapper, /SET LOCAL search_path = pg_catalog, public;/);
+  assert.match(wrapper, /SET LOCAL search_path = pg_catalog, public, pg_temp;/);
   assert.match(wrapper, /\\ir operational-metrics.sql/);
   await prisma.$transaction(async (tx) => {
     await tx.$executeRawUnsafe('SET TRANSACTION READ ONLY');
     await tx.$executeRawUnsafe("SET LOCAL statement_timeout = '5s'");
     await tx.$executeRawUnsafe("SET LOCAL lock_timeout = '1s'");
-    await tx.$executeRawUnsafe('SET LOCAL search_path = pg_catalog, public');
+    await tx.$executeRawUnsafe('SET LOCAL search_path = pg_catalog, public, pg_temp');
     const [settings] = await tx.$queryRawUnsafe('SHOW transaction_read_only');
     assert.equal(settings.transaction_read_only, 'on');
     await report(tx, sql);
