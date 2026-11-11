@@ -15,6 +15,9 @@ import {
   paymentError,
   paymentPatchBody,
   nextLocalClientId,
+  authHeaders,
+  sessionState,
+  getToken,
   dateFromApi,
   instantFromApi,
   localDay,
@@ -265,4 +268,17 @@ test("paymentPatchBody reduces the dues and marks a cleared account as paid", ()
 test("nextLocalClientId continues the c# sequence numerically", () => {
   assert.equal(nextLocalClientId([]), "c1");
   assert.equal(nextLocalClientId([{ id: "c1" }, { id: "c6" }, { id: "c10" }, { id: "x" }]), "c11");
+});
+
+test("authHeaders sends a Bearer token only when signed in", () => {
+  assert.deepEqual(authHeaders("abc.def"), { Authorization: "Bearer abc.def" });
+  assert.deepEqual(authHeaders(null), {});
+  assert.equal(getToken(), null, "no token before signing in");
+  assert.deepEqual(authHeaders(), {});
+});
+
+test("sessionState decides between open, sign-in and signed-in", () => {
+  assert.equal(sessionState({ required: false, authenticated: false }), "open");
+  assert.equal(sessionState({ required: true, authenticated: false }), "login");
+  assert.equal(sessionState({ required: true, authenticated: true }), "signedIn");
 });

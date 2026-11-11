@@ -170,6 +170,57 @@ export function statusPatchBody(status) {
   return { status };
 }
 
+/* ---- staff sign-in ------------------------------------------------ */
+
+// The token from POST /api/auth/login, kept in this browser until it expires
+// or the user signs out. Storage can be missing (tests) or blocked (private mode).
+const TOKEN_KEY = "nk.staffToken";
+const storage = () => {
+  try {
+    return globalThis.localStorage ?? null;
+  } catch {
+    return null;
+  }
+};
+let memoryToken = null;
+
+export function getToken() {
+  try {
+    return storage()?.getItem(TOKEN_KEY) ?? memoryToken;
+  } catch {
+    return memoryToken;
+  }
+}
+
+function setToken(token) {
+  memoryToken = token;
+  try {
+    if (token === null) storage()?.removeItem(TOKEN_KEY);
+    else storage()?.setItem(TOKEN_KEY, token);
+  } catch {
+    // storage blocked: the token still works until the page is closed
+  }
+}
+
+// Called when the server stops accepting the token, so the app can show the
+// sign-in screen. Returns a function that removes the listener.
+const authLostListeners = new Set();
+export function onAuthLost(listener) {
+  authLostListeners.add(listener);
+  return () => authLostListeners.delete(listener);
+}
+
+// Authorization header for a request, or nothing when not signed in.
+export function authHeaders(token = getToken()) {
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+// What the app should show for the answer from GET /api/auth/session.
+export function sessionState(session) {
+  if (!session.required) return "open";
+  return session.authenticated ? "signedIn" : "login";
+}
+
 /* ---- fetch ------------------------------------------------------- */
 
 async function request(path, options = {}) {
@@ -177,10 +228,17 @@ async function request(path, options = {}) {
   try {
     res = await fetch(`${API_URL}${path}`, {
       ...options,
-      headers: { "Content-Type": "application/json", ...options.headers },
+      headers: { "Content-Type": "application/json", ...authHeaders(), ...options.headers },
     });
   } catch {
     throw new Error("Could not reach the server. Check your connection and try again.");
+  }
+
+  // The token expired or the password changed: forget it and ask to sign in again.
+  if (res.status === 401 && path !== "/api/auth/login") {
+    setToken(null);
+    authLostListeners.forEach((listener) => listener());
+    throw new Error("Please sign in again.");
   }
 
   if (!res.ok) {
@@ -260,4 +318,17 @@ export async function recordPayment(client, amount) {
 
 export async function deleteClient(id) {
   await request(`/api/clients/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export async function fetchSession() {
+  return sessionState(await request("/api/auth/session"));
+}
+
+export async function login(password) {
+  const { token } = await request("/api/auth/login", { method: "POST", body: JSON.stringify({ password }) });
+  setToken(token);
+}
+
+export function logout() {
+  setToken(null);
 }
