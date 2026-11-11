@@ -15,6 +15,9 @@ export function taskFromApi(t) {
   const task = { ...rest, assignee: assigneeId };
   // A calendar date with no time: keep its UTC day (see dateFromApi).
   if ("expectedCompletion" in task) task.expectedCompletion = dateFromApi(task.expectedCompletion);
+  // A moment in time, shown as the viewer's local day. createdAt stays a full
+  // timestamp because it is only used for ordering.
+  if ("completedAt" in task) task.completedAt = instantFromApi(task.completedAt);
   return task;
 }
 
