@@ -77,3 +77,16 @@ model Payment {
 
   @@index([clientId])
 }
+
+// A message sent from the public landing page. Anyone can create one; only
+// signed-in staff can read, update or delete them.
+model Enquiry {
+  id        Int      @id @default(autoincrement())
+  name      String
+  phone     String
+  // What the visitor needs, in their words. Optional.
+  message   String?
+  // "new" | "contacted" | "closed"
+  status    String   @default("new")
+  createdAt DateTime @default(now())
+}

@@ -184,6 +184,40 @@ export function statusPatchBody(status) {
   return { status };
 }
 
+// "Today", "1 day ago" or "N days ago" for a YYYY-MM-DD day. Counts calendar
+// days, so something from this morning is still "Today" in the afternoon.
+export function daysAgo(day, today = localDay()) {
+  const diff = Math.round((Date.parse(`${today}T00:00:00Z`) - Date.parse(`${day}T00:00:00Z`)) / 86400000);
+  if (diff <= 0) return "Today";
+  if (diff === 1) return "1 day ago";
+  return `${diff} days ago`;
+}
+
+/* ---- enquiries from the landing page ------------------------------ */
+
+// Why the enquiry form cannot be sent, or null when it can. Mirrors the API's rules.
+export function enquiryError(form) {
+  if (!String(form.name ?? "").trim()) return "Please enter your name.";
+  if (String(form.name).trim().length > 100) return "Name must be 100 characters or fewer.";
+  const phone = String(form.phone ?? "").trim();
+  const digits = phone.replace(/\D/g, "").length;
+  if (!/^[\d\s()+-]+$/.test(phone) || digits < 7 || digits > 15) return "Please enter a valid phone number.";
+  if (String(form.message ?? "").trim().length > 1000) return "Message must be 1000 characters or fewer.";
+  return null;
+}
+
+// Body for POST /api/enquiries. "website" is the hidden field only scripts fill in.
+export function enquiryToApi(form) {
+  const body = { name: form.name.trim(), phone: form.phone.trim(), message: (form.message ?? "").trim() || null };
+  if (form.website) body.website = form.website;
+  return body;
+}
+
+// An enquiry from the API: the moment it arrived becomes the viewer's local day.
+export function enquiryFromApi(e) {
+  return { ...e, createdAt: instantFromApi(e.createdAt) };
+}
+
 /* ---- staff sign-in ------------------------------------------------ */
 
 // The token from POST /api/auth/login, kept in this browser until it expires
@@ -350,4 +384,22 @@ export async function login(password) {
 
 export function logout() {
   setToken(null);
+}
+
+export async function sendEnquiry(form) {
+  await request("/api/enquiries", { method: "POST", body: JSON.stringify(enquiryToApi(form)) });
+}
+
+export async function fetchEnquiries() {
+  return (await request("/api/enquiries")).map(enquiryFromApi);
+}
+
+export async function updateEnquiryStatus(id, status) {
+  return enquiryFromApi(
+    await request(`/api/enquiries/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ status }) })
+  );
+}
+
+export async function deleteEnquiry(id) {
+  await request(`/api/enquiries/${encodeURIComponent(id)}`, { method: "DELETE" });
 }

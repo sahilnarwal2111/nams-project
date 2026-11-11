@@ -5,13 +5,14 @@ import {
   createClient, updateClient, deleteClient, recordPayment, fetchPayments,
   clientToApi, clientFormError, paymentError, paymentPatchBody, parseRupees, nextLocalClientId,
   fetchSession, login, logout, onAuthLost,
+  daysAgo, enquiryError, sendEnquiry, fetchEnquiries, updateEnquiryStatus, deleteEnquiry,
 } from "./api.js";
 import { filterTasks, sortTasks, isOverdue, SORT_MODES } from "./board.js";
 import {
   Ruler, Route, Building2, Droplets, Plane, Waves,
   Menu, X, ChevronRight, Clock, PhoneCall,
   Mail, Phone, MapPin, ArrowLeft,
-  ArrowRight, Filter, ChevronDown, Plus, Pencil, Trash2, CalendarDays, IndianRupee, Lock, LogOut, History, Search, CircleCheck
+  ArrowRight, Filter, ChevronDown, Plus, Pencil, Trash2, CalendarDays, IndianRupee, Lock, LogOut, History, Search, CircleCheck, Send, MessageSquare
 } from "lucide-react";
 
 /* ---------------------------------------------------------------
@@ -117,14 +118,20 @@ const PAY_STATUS_META = {
   overdue: { label: "Overdue", color: C.orangeDeep, bg: "#FDF0EA" },
 };
 
+const ENQUIRY_STATUS_META = {
+  new: { label: "New", color: C.orangeDeep, bg: "#FDF0EA" },
+  contacted: { label: "Contacted", color: C.blue, bg: "#EBF3FA" },
+  closed: { label: "Closed", color: C.green, bg: "#EEF3ED" },
+};
+
+// Mock mode only: sample enquiries, newest first.
+const INITIAL_ENQUIRIES = [
+  { id: 2, name: "Suresh Malik", phone: "+91 98120 44556", message: "Need a boundary survey for a 2 acre plot near Uchana before registry.", status: "new", createdAt: "2026-11-10" },
+  { id: 1, name: "Kavita Sharma", phone: "+91 94160 22113", message: "Quotation for drone survey of a warehouse site in Narwana.", status: "contacted", createdAt: "2026-11-07" },
+];
+
 const fmtINR = (n) => "₹" + n.toLocaleString("en-IN");
 const fmtDate = (s) => new Date(s + "T00:00:00").toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
-const daysAgo = (s) => {
-  const diff = Math.round((Date.now() - new Date(s + "T00:00:00").getTime()) / 86400000);
-  if (diff <= 0) return "Today";
-  if (diff === 1) return "1 day ago";
-  return `${diff} days ago`;
-};
 
 /* ---------------------------------------------------------------
    NAVIGATION BAR
@@ -135,6 +142,7 @@ function TopNav({ page, setPage, onSignOut }) {
     { id: "home", label: "Overview" },
     { id: "work", label: "Work Board" },
     { id: "payments", label: "Receivables" },
+    { id: "enquiries", label: "Enquiries" },
   ];
 
   return (
@@ -225,7 +233,76 @@ function TopNav({ page, setPage, onSignOut }) {
 /* ---------------------------------------------------------------
    LANDING / OVERVIEW PAGE
 ------------------------------------------------------------------*/
-function Landing({ setPage }) {
+// The public "contact us" form. onSend returns a promise; a rejection is shown
+// and the visitor's text is kept so they can try again.
+function EnquiryForm({ onSend }) {
+  const empty = { name: "", phone: "", message: "", website: "" };
+  const [form, setForm] = useState(empty);
+  const [state, setState] = useState({ step: "idle" }); // idle | sending | sent | error
+  const set = (key) => (e) => setForm((f) => ({ ...f, [key]: e.target.value }));
+  const inputStyle = { borderColor: C.line, color: C.ink };
+
+  const submit = (e) => {
+    e.preventDefault();
+    if (state.step === "sending") return;
+    const problem = enquiryError(form);
+    if (problem) return setState({ step: "error", message: problem });
+    setState({ step: "sending" });
+    onSend(form)
+      .then(() => { setForm(empty); setState({ step: "sent" }); })
+      .catch((err) => setState({ step: "error", message: err.message }));
+  };
+
+  if (state.step === "sent") {
+    return (
+      <div role="status" style={{ background: C.card, borderColor: C.line }} className="border rounded-md p-8 text-center shadow-sm">
+        <div style={{ background: "#EEF3ED", color: C.green }} className="w-12 h-12 rounded-full flex items-center justify-center mx-auto mb-4">
+          <CircleCheck size={24} />
+        </div>
+        <h3 style={{ color: C.ink }} className="f-display text-lg font-bold mb-1">Thank you. We have your enquiry.</h3>
+        <p style={{ color: C.steel }} className="f-body text-sm mb-5">Our office will call you back on the number you gave.</p>
+        <button onClick={() => setState({ step: "idle" })} style={{ color: C.blue }} className="f-body text-sm font-semibold underline">
+          Send another enquiry
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <form onSubmit={submit} noValidate aria-label="Enquiry form" style={{ background: C.card, borderColor: C.line }} className="border rounded-md p-6 shadow-sm space-y-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <Field label="Your name" required>
+          <input name="name" value={form.name} onChange={set("name")} maxLength={100} autoComplete="name" style={inputStyle} className={INPUT_CLASS} />
+        </Field>
+        <Field label="Phone number" required>
+          <input name="phone" type="tel" value={form.phone} onChange={set("phone")} maxLength={25} autoComplete="tel" placeholder="+91" style={inputStyle} className={INPUT_CLASS} />
+        </Field>
+      </div>
+      <Field label="What do you need?">
+        <textarea name="message" value={form.message} onChange={set("message")} rows={4} maxLength={1000} placeholder="For example: boundary survey of a plot in Safidon" style={inputStyle} className={INPUT_CLASS} />
+      </Field>
+      {/* Hidden from people; only a script fills it in, and the server drops those. */}
+      <div aria-hidden="true" className="absolute -left-[9999px] w-px h-px overflow-hidden">
+        <label>Website <input name="website" tabIndex={-1} autoComplete="off" value={form.website} onChange={set("website")} /></label>
+      </div>
+      {state.step === "error" && (
+        <div role="alert" style={{ borderColor: C.orangeDeep, background: "#FDF0EA", color: C.orangeDeep }} className="border rounded px-3 py-2 f-body text-sm">
+          {state.message}
+        </div>
+      )}
+      <button
+        type="submit"
+        disabled={state.step === "sending"}
+        style={{ background: C.orange, color: "#FFFFFF" }}
+        className="f-body font-semibold text-sm px-6 py-3 rounded shadow-sm hover:opacity-95 disabled:opacity-60 flex items-center justify-center gap-2 w-full sm:w-auto"
+      >
+        <Send size={15} /> {state.step === "sending" ? "Sending…" : "Send Enquiry"}
+      </button>
+    </form>
+  );
+}
+
+function Landing({ setPage, onEnquiry }) {
   return (
     <div className="w-full">
       {/* HERO */}
@@ -252,6 +329,13 @@ function Landing({ setPage }) {
                 className="f-body font-medium text-sm px-6 py-3.5 rounded border hover:bg-white/5 transition-colors flex items-center justify-center gap-2"
               >
                 Explore Services <ChevronDown size={16} />
+              </a>
+              <a
+                href="#enquiry"
+                style={{ borderColor: C.lineDark, color: C.paper }}
+                className="f-body font-medium text-sm px-6 py-3.5 rounded border hover:bg-white/5 transition-colors flex items-center justify-center gap-2"
+              >
+                Send an Enquiry <MessageSquare size={16} />
               </a>
             </div>
           </div>
@@ -303,6 +387,26 @@ function Landing({ setPage }) {
                 </div>
               </div>
             ))}
+          </div>
+        </div>
+      </section>
+
+      {/* ENQUIRY */}
+      <section id="enquiry" style={{ background: C.paper }} className="border-t border-stone-300">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-14 sm:py-20 grid grid-cols-1 lg:grid-cols-5 gap-10">
+          <div className="lg:col-span-2">
+            <div style={{ color: C.orangeDeep }} className="f-mono text-xs font-semibold tracking-wider uppercase mb-1">Get In Touch</div>
+            <h2 style={{ color: C.ink }} className="f-display text-2xl sm:text-3xl font-bold mb-4">Tell us about your site</h2>
+            <p style={{ color: C.steel }} className="f-body text-sm leading-relaxed mb-6">
+              Leave your number and a line about the work. Our office will call you back with the next steps and a quotation.
+            </p>
+            <div style={{ color: C.ink }} className="f-body text-sm space-y-2.5">
+              <div className="flex items-center gap-2.5"><Phone size={16} style={{ color: C.orange }} /> +91-9355247066</div>
+              <div className="flex items-center gap-2.5"><MapPin size={16} style={{ color: C.orange }} /> Jind, Haryana, India</div>
+            </div>
+          </div>
+          <div className="lg:col-span-3 relative">
+            <EnquiryForm onSend={onEnquiry} />
           </div>
         </div>
       </section>
@@ -1386,6 +1490,201 @@ function Payments() {
 }
 
 /* ---------------------------------------------------------------
+   ENQUIRIES (staff view of the landing page form)
+------------------------------------------------------------------*/
+function EnquiryCard({ enquiry, busy, onStatus, onDelete }) {
+  const meta = ENQUIRY_STATUS_META[enquiry.status] ?? ENQUIRY_STATUS_META.new;
+  const [confirming, setConfirming] = useState(false);
+  const action = (label, status, primary) => (
+    <button
+      key={status}
+      disabled={busy}
+      onClick={() => onStatus(enquiry.id, status)}
+      style={primary ? { background: C.navy, color: C.paper } : { borderColor: C.line, color: C.ink }}
+      className={`f-body text-xs font-semibold px-3 py-2 rounded disabled:opacity-50 ${primary ? "shadow-sm hover:opacity-90" : "border bg-white hover:bg-stone-50"}`}
+    >
+      {label}
+    </button>
+  );
+  return (
+    <div data-testid="enquiry-card" style={{ background: C.card, borderColor: C.line }} className="border rounded-md p-5 shadow-sm flex flex-col">
+      <div className="flex items-start justify-between gap-3 mb-3">
+        <div className="min-w-0">
+          <h3 style={{ color: C.ink }} className="f-display text-base font-bold break-words">{enquiry.name}</h3>
+          <a href={`tel:${enquiry.phone.replace(/[^\d+]/g, "")}`} style={{ color: C.blue }} className="f-mono text-sm font-medium inline-flex items-center gap-1.5 mt-1">
+            <Phone size={13} /> {enquiry.phone}
+          </a>
+        </div>
+        <span style={{ background: meta.bg, color: meta.color }} className="f-mono text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded shrink-0">{meta.label}</span>
+      </div>
+      <p style={{ color: enquiry.message ? C.ink : C.steel }} className="f-body text-sm leading-relaxed whitespace-pre-wrap break-words mb-4 flex-1">
+        {enquiry.message || "No message left."}
+      </p>
+      <div style={{ color: C.steel }} className="f-body text-xs flex items-center gap-1.5 mb-4">
+        <CalendarDays size={12} /> Received {fmtDate(enquiry.createdAt)} · {daysAgo(enquiry.createdAt)}
+      </div>
+      <div style={{ borderColor: C.line }} className="border-t pt-3 flex flex-wrap items-center gap-2">
+        {enquiry.status === "new" && action("Mark Contacted", "contacted", true)}
+        {enquiry.status !== "closed" && action("Close", "closed", false)}
+        {enquiry.status !== "new" && action("Reopen", "new", false)}
+        <span className="ml-auto flex items-center gap-2">
+          {confirming ? (
+            <>
+              <button disabled={busy} onClick={() => onDelete(enquiry.id)} style={{ background: C.orangeDeep, color: "#FFFFFF" }} className="f-body text-xs font-semibold px-3 py-2 rounded disabled:opacity-50">Yes, delete</button>
+              <button onClick={() => setConfirming(false)} style={{ color: C.steel }} className="f-body text-xs font-medium px-2 py-2">Keep</button>
+            </>
+          ) : (
+            <button disabled={busy} onClick={() => setConfirming(true)} aria-label={`Delete enquiry from ${enquiry.name}`} style={{ color: C.steel }} className="p-2 rounded hover:bg-stone-100 disabled:opacity-50">
+              <Trash2 size={15} />
+            </button>
+          )}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+// local / setLocal hold the enquiries in mock mode, where the landing page
+// form adds to the same list.
+function Enquiries({ local, setLocal }) {
+  const useApi = hasApi();
+  const [remote, setRemote] = useState([]);
+  const [load, setLoad] = useState(useApi ? { state: "loading" } : { state: "ready" });
+  const [attempt, setAttempt] = useState(0);
+  const [saveError, setSaveError] = useState(null);
+  const [saving, setSaving] = useState(() => new Set());
+  const [filter, setFilter] = useState("open");
+  const enquiries = useApi ? remote : local;
+  const setEnquiries = useApi ? setRemote : setLocal;
+
+  useEffect(() => {
+    if (!useApi) return undefined;
+    let cancelled = false;
+    fetchEnquiries()
+      .then((list) => {
+        if (cancelled) return;
+        setRemote(list);
+        setLoad({ state: "ready" });
+      })
+      .catch((err) => {
+        if (!cancelled) setLoad({ state: "error", message: err.message });
+      });
+    return () => { cancelled = true; };
+  }, [useApi, attempt]);
+
+  const retry = () => {
+    setLoad({ state: "loading" });
+    setAttempt((a) => a + 1);
+  };
+
+  const setBusy = (id, on) => setSaving((prev) => {
+    const next = new Set(prev);
+    if (on) next.add(id); else next.delete(id);
+    return next;
+  });
+
+  // The status changes at once and goes back if the save fails.
+  const changeStatus = (id, status) => {
+    const enquiry = enquiries.find((e) => e.id === id);
+    if (!enquiry || saving.has(id)) return;
+    const previous = enquiry.status;
+    setSaveError(null);
+    setEnquiries((prev) => prev.map((e) => (e.id === id ? { ...e, status } : e)));
+    if (!useApi) return;
+    setBusy(id, true);
+    updateEnquiryStatus(id, status)
+      .catch((err) => {
+        setEnquiries((prev) => prev.map((e) => (e.id === id ? { ...e, status: previous } : e)));
+        setSaveError(`Could not update the enquiry from ${enquiry.name}. ${err.message}`);
+      })
+      .finally(() => setBusy(id, false));
+  };
+
+  const remove = (id) => {
+    const enquiry = enquiries.find((e) => e.id === id);
+    if (!enquiry || saving.has(id)) return;
+    setSaveError(null);
+    if (!useApi) return setEnquiries((prev) => prev.filter((e) => e.id !== id));
+    setBusy(id, true);
+    deleteEnquiry(id)
+      .then(() => setEnquiries((prev) => prev.filter((e) => e.id !== id)))
+      .catch((err) => setSaveError(`Could not delete the enquiry from ${enquiry.name}. ${err.message}`))
+      .finally(() => setBusy(id, false));
+  };
+
+  const counts = { new: 0, contacted: 0, closed: 0 };
+  enquiries.forEach((e) => { if (e.status in counts) counts[e.status] += 1; });
+  const visible = enquiries.filter((e) => (filter === "all" ? true : filter === "open" ? e.status !== "closed" : e.status === filter));
+
+  return (
+    <div style={{ background: C.paper }} className="w-full min-h-[calc(100vh-4rem)]">
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 sm:py-12">
+        <div className="mb-8">
+          <div style={{ color: C.orangeDeep }} className="f-mono text-xs font-semibold tracking-wider uppercase mb-1">Website Leads</div>
+          <h1 style={{ color: C.ink }} className="f-display text-2xl sm:text-3xl font-bold">Enquiries</h1>
+          <p style={{ color: C.steel }} className="f-body text-sm mt-1">Messages sent from the contact form on the website.</p>
+        </div>
+
+        {load.state === "loading" && (
+          <div style={{ borderColor: C.line, color: C.steel, background: C.card }} className="border rounded-md p-10 text-center f-body text-sm">
+            Loading enquiries…
+          </div>
+        )}
+
+        {load.state === "error" && (
+          <div style={{ borderColor: C.orangeDeep, background: "#FDF0EA" }} className="border rounded-md p-6 text-center">
+            <p style={{ color: C.orangeDeep }} className="f-body text-sm mb-3">Could not load enquiries. {load.message}</p>
+            <button onClick={retry} style={{ background: C.navy, color: C.paper }} className="f-body text-xs font-semibold px-4 py-2 rounded shadow-sm hover:opacity-90">
+              Retry
+            </button>
+          </div>
+        )}
+
+        {load.state === "ready" && (<>
+          {saveError && (
+            <div role="alert" style={{ borderColor: C.orangeDeep, background: "#FDF0EA", color: C.orangeDeep }} className="border rounded-md px-4 py-3 mb-4 f-body text-sm flex items-start justify-between gap-3">
+              <span>{saveError}</span>
+              <button onClick={() => setSaveError(null)} aria-label="Dismiss" className="shrink-0"><X size={16} /></button>
+            </div>
+          )}
+
+          <div className="flex items-center gap-2 mb-6 overflow-x-auto pb-2 no-scrollbar">
+            {[
+              { id: "open", label: `Open (${counts.new + counts.contacted})` },
+              { id: "new", label: `New (${counts.new})` },
+              { id: "contacted", label: `Contacted (${counts.contacted})` },
+              { id: "closed", label: `Closed (${counts.closed})` },
+              { id: "all", label: `All (${enquiries.length})` },
+            ].map((f) => (
+              <button
+                key={f.id}
+                onClick={() => setFilter(f.id)}
+                style={{ background: filter === f.id ? C.navy : C.card, color: filter === f.id ? C.paper : C.ink, borderColor: C.line }}
+                className="f-body text-xs px-4 py-2 rounded border font-medium whitespace-nowrap shadow-sm shrink-0"
+              >
+                {f.label}
+              </button>
+            ))}
+          </div>
+
+          {visible.length === 0 ? (
+            <div style={{ borderColor: C.line, color: C.steel, background: C.card }} className="border border-dashed rounded-md p-10 text-center f-body text-sm">
+              {enquiries.length === 0 ? "No enquiries yet. They appear here when someone fills in the form on the website." : "No enquiries in this list."}
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+              {visible.map((e) => (
+                <EnquiryCard key={e.id} enquiry={e} busy={saving.has(e.id)} onStatus={changeStatus} onDelete={remove} />
+              ))}
+            </div>
+          )}
+        </>)}
+      </div>
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------------
    STAFF SIGN-IN
 ------------------------------------------------------------------*/
 // Whether the staff pages may be shown: "open" (no API, or the server has no
@@ -1484,13 +1783,23 @@ function StaffOnly({ staff, children }) {
 export default function App() {
   const [page, setPage] = useState("home");
   const staff = useStaffSession();
+  // Mock mode only: enquiries live here so the landing page form and the
+  // Enquiries page share one list.
+  const [localEnquiries, setLocalEnquiries] = useState(INITIAL_ENQUIRIES);
+  const sendLocalEnquiry = async (form) => {
+    setLocalEnquiries((prev) => [
+      { id: Math.max(0, ...prev.map((e) => e.id)) + 1, name: form.name.trim(), phone: form.phone.trim(), message: form.message.trim() || null, status: "new", createdAt: localDay() },
+      ...prev,
+    ]);
+  };
   return (
     <div className="f-body w-full min-h-screen antialiased" style={{ background: C.paper }}>
       <TopNav page={page} setPage={setPage} onSignOut={staff.session.state === "signedIn" ? staff.signOut : null} />
       <main>
-        {page === "home" && <Landing setPage={setPage} />}
+        {page === "home" && <Landing setPage={setPage} onEnquiry={hasApi() ? sendEnquiry : sendLocalEnquiry} />}
         {page === "work" && <StaffOnly staff={staff}><WorkBoard /></StaffOnly>}
         {page === "payments" && <StaffOnly staff={staff}><Payments /></StaffOnly>}
+        {page === "enquiries" && <StaffOnly staff={staff}><Enquiries local={localEnquiries} setLocal={setLocalEnquiries} /></StaffOnly>}
       </main>
     </div>
   );
