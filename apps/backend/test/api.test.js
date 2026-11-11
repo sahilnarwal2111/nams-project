@@ -59,6 +59,22 @@ test("GET /api/tasks returns tasks with values the UI understands", async () => 
   }
 });
 
+test("GET /api/tasks/:id returns one task", async () => {
+  const res = await get("/api/tasks/NK-102");
+  assert.equal(res.status, 200);
+  const task = await res.json();
+  assert.equal(task.id, "NK-102");
+  assert.ok(["todo", "inprogress", "done"].includes(task.status));
+  assert.ok(["low", "medium", "high"].includes(task.priority));
+  assert.ok(task.assigneeId);
+});
+
+test("GET /api/tasks/:id returns 404 for an unknown task", async () => {
+  const res = await get("/api/tasks/NK-999");
+  assert.equal(res.status, 404);
+  assert.match((await res.json()).error, /not found/);
+});
+
 test("PATCH /api/tasks/:id changes the status", async () => {
   const tasks = await (await get("/api/tasks")).json();
   const original = tasks.find((t) => t.id === "NK-102");
