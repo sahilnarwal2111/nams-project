@@ -1254,8 +1254,6 @@ test("personal sign-in refuses a wrong password, someone else's password and peo
       { as: "e999", password: ANKIT_PASSWORD },
       { as: "e6" },
       { as: 6, password: ANKIT_PASSWORD },
-      { as: "admin", password: PASSWORD },
-      { as: "office", password: ADMIN_PASSWORD },
     ];
     for (const body of tries) {
       clearFailedLogins();
@@ -1266,6 +1264,10 @@ test("personal sign-in refuses a wrong password, someone else's password and peo
     clearFailedLogins();
     assert.equal((await post("/api/auth/login", { as: "admin", password: ADMIN_PASSWORD })).status, 200);
     assert.equal((await post("/api/auth/login", { as: "office", password: PASSWORD })).status, 200);
+    for (const as of [undefined, "shared", "admin", "office"]) {
+      assert.equal((await (await post("/api/auth/login", { as, password: ADMIN_PASSWORD })).json()).role, "admin", String(as));
+      assert.equal((await (await post("/api/auth/login", { as, password: PASSWORD })).json()).role, "staff", String(as));
+    }
   });
 });
 
@@ -1390,4 +1392,36 @@ test("GET /api/team is public and sends only name, role and initials", async () 
     const text = JSON.stringify(team);
     assert.ok(!text.includes("scrypt") && !text.includes("hasPassword") && !text.includes("tasks"));
   });
+});
+
+// Issue #42: after PR #41 the sign-in screen started on "Office", and the
+// server refused the admin password unless "Admin" was picked in the list.
+test("the admin password signs in as admin whichever shared choice is picked", async () => {
+  await withRoles(async () => {
+    for (const as of ["office", "shared", "admin", undefined]) {
+      clearFailedLogins();
+      const res = await post("/api/auth/login", { as, password: ADMIN_PASSWORD });
+      assert.equal(res.status, 200, String(as));
+      const { token, role } = await res.json();
+      assert.equal(role, "admin");
+      assert.equal((await (await authed("/api/clients", token)).json())[0].due, 184000, "amounts are visible");
+    }
+  });
+});
+
+test("spaces or a line break around a password in the server settings are ignored", async () => {
+  process.env.APP_PASSWORD = `  ${PASSWORD}\n`;
+  process.env.ADMIN_PASSWORD = `${ADMIN_PASSWORD} \r\n`;
+  clearFailedLogins();
+  try {
+    assert.equal((await (await post("/api/auth/login", { password: ADMIN_PASSWORD })).json()).role, "admin");
+    const { token, role } = await (await post("/api/auth/login", { password: PASSWORD })).json();
+    assert.equal(role, "staff");
+    assert.equal((await authed("/api/tasks", token)).status, 200);
+    assert.equal((await post("/api/auth/login", { password: `${PASSWORD}\n` })).status, 401, "the typed password is still exact");
+  } finally {
+    delete process.env.APP_PASSWORD;
+    delete process.env.ADMIN_PASSWORD;
+    clearFailedLogins();
+  }
 });

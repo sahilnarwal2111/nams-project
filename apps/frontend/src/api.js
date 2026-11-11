@@ -282,11 +282,12 @@ export function canEditTask(task, viewer) {
   return Boolean(viewer?.isAdmin || (viewer?.employeeId && task.assignee === viewer.employeeId));
 }
 
-// Who to sign in as: an employee id, "office" or "admin". People come first,
-// then the office password, which everyone used before personal passwords. A remembered choice
+// Who to sign in as: "shared" (the admin or office password; the password
+// decides which) or an employee id. The shared choice comes first and is the
+// default, so the admin can always just type their password. A remembered choice
 // is kept only while it is still on offer.
 export function signInChoices(people = []) {
-  return [...people.map((p) => ({ value: p.id, label: p.name })), { value: "office", label: "Office (view only)" }, { value: "admin", label: "Admin" }];
+  return [{ value: "shared", label: "Admin or office password" }, ...people.map((p) => ({ value: p.id, label: p.name }))];
 }
 export function defaultSignInChoice(people = [], remembered = null) {
   const choices = signInChoices(people);
