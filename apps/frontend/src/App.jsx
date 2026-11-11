@@ -2,12 +2,14 @@ import { useState, useMemo, useEffect } from "react";
 import {
   hasApi, fetchEmployees, fetchTasks, updateTaskStatus, fetchClients, logClientCall, localDay,
   createTask, updateTask, deleteTask, taskFromForm, nextLocalTaskId,
+  createClient, updateClient, deleteClient, recordPayment,
+  clientToApi, clientFormError, paymentError, paymentPatchBody, parseRupees, nextLocalClientId,
 } from "./api.js";
 import {
   Ruler, Route, Building2, Droplets, Plane, Waves,
   Menu, X, ChevronRight, Clock, PhoneCall,
   Mail, Phone, MapPin, ArrowLeft,
-  ArrowRight, Filter, ChevronDown, Plus, Pencil, Trash2, CalendarDays
+  ArrowRight, Filter, ChevronDown, Plus, Pencil, Trash2, CalendarDays, IndianRupee
 } from "lucide-react";
 
 /* ---------------------------------------------------------------
@@ -390,6 +392,98 @@ function TaskCard({ task, employees, onMove, onEdit, busy }) {
   );
 }
 
+// Runs a save or delete for a dialog: a rejection is shown in the dialog, which
+// stays open; success closes it.
+function useDialogAction(onClose) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const run = (action) => {
+    setBusy(true);
+    setError(null);
+    action()
+      .then(onClose)
+      .catch((err) => { setError(err.message); setBusy(false); });
+  };
+  return { busy, error, setError, run };
+}
+
+function Modal({ label, kicker, title, busy, onClose, onSubmit, footer, width = "max-w-2xl", children }) {
+  return (
+    <div
+      style={{ background: "rgba(9, 21, 36, 0.55)" }}
+      className="fixed inset-0 z-[60] flex items-start sm:items-center justify-center p-3 sm:p-6 overflow-y-auto"
+      onClick={(e) => { if (e.target === e.currentTarget && !busy) onClose(); }}
+    >
+      <form
+        onSubmit={onSubmit}
+        role="dialog"
+        aria-label={label}
+        style={{ background: C.paper, borderColor: C.line }}
+        className={`w-full ${width} border rounded-lg shadow-xl`}
+      >
+        <div style={{ background: C.navy }} className="flex items-center justify-between px-5 py-4 rounded-t-lg">
+          <div>
+            <div style={{ color: C.orange }} className="f-mono text-[10px] font-semibold tracking-wider uppercase">{kicker}</div>
+            <h2 style={{ color: C.paper }} className="f-display text-lg font-bold">{title}</h2>
+          </div>
+          <button type="button" onClick={onClose} disabled={busy} aria-label="Close" style={{ color: C.paper }} className="p-1 rounded hover:opacity-80">
+            <X size={20} />
+          </button>
+        </div>
+        {children}
+        <div style={{ borderColor: C.line }} className="border-t px-5 py-4 flex items-center justify-between gap-3 flex-wrap">
+          {footer}
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function DialogError({ error }) {
+  if (!error) return null;
+  return (
+    <div role="alert" style={{ borderColor: C.orangeDeep, background: "#FDF0EA", color: C.orangeDeep }} className="sm:col-span-2 border rounded-md px-3 py-2 f-body text-sm">
+      {error}
+    </div>
+  );
+}
+
+// Delete button that asks once before calling onConfirm.
+function DeleteControl({ question, busy, onConfirm }) {
+  const [asking, setAsking] = useState(false);
+  if (!asking) {
+    return (
+      <button type="button" onClick={() => setAsking(true)} disabled={busy} style={{ color: C.orangeDeep }} className="f-body text-xs font-semibold flex items-center gap-1.5 px-2 py-2 rounded hover:bg-orange-50">
+        <Trash2 size={14} /> Delete
+      </button>
+    );
+  }
+  return (
+    <div className="flex items-center gap-2 flex-wrap">
+      <span style={{ color: C.orangeDeep }} className="f-body text-xs font-semibold">{question}</span>
+      <button type="button" onClick={onConfirm} disabled={busy} style={{ background: C.orangeDeep, color: C.paper }} className="f-body text-xs font-semibold px-3 py-1.5 rounded">
+        Yes, delete
+      </button>
+      <button type="button" onClick={() => setAsking(false)} disabled={busy} style={{ borderColor: C.line, color: C.ink }} className="f-body text-xs px-3 py-1.5 rounded border bg-white">
+        No
+      </button>
+    </div>
+  );
+}
+
+function DialogButtons({ busy, onClose, saveLabel }) {
+  return (
+    <div className="flex items-center gap-2 ml-auto">
+      <button type="button" onClick={onClose} disabled={busy} style={{ borderColor: C.line, color: C.ink }} className="f-body text-sm px-4 py-2 rounded border bg-white">
+        Cancel
+      </button>
+      <button type="submit" disabled={busy} style={{ background: C.orange, color: C.paper }} className="f-body text-sm font-semibold px-5 py-2 rounded shadow-sm hover:opacity-90 disabled:opacity-60">
+        {busy ? "Saving…" : saveLabel}
+      </button>
+    </div>
+  );
+}
+
 const EMPTY_WORK = {
   title: "", client: "", customerPhone: "", district: "", department: "",
   workTypes: [], details: "", expectedCompletion: "", priority: "medium", assignee: "",
@@ -418,21 +512,11 @@ function WorkForm({ task, employees, onSave, onDelete, onClose }) {
       ? Object.fromEntries(Object.keys(EMPTY_WORK).map((k) => [k, task[k] ?? EMPTY_WORK[k]]))
       : {}),
   }));
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState(null);
-  const [confirmDelete, setConfirmDelete] = useState(false);
+  const { busy, error, setError, run } = useDialogAction(onClose);
 
   const set = (key) => (e) => setForm((f) => ({ ...f, [key]: e.target.value }));
   const toggleType = (id) =>
     setForm((f) => ({ ...f, workTypes: f.workTypes.includes(id) ? f.workTypes.filter((t) => t !== id) : [...f.workTypes, id] }));
-
-  const run = (action) => {
-    setBusy(true);
-    setError(null);
-    action()
-      .then(onClose)
-      .catch((err) => { setError(err.message); setBusy(false); });
-  };
 
   const submit = (e) => {
     e.preventDefault();
@@ -446,30 +530,20 @@ function WorkForm({ task, employees, onSave, onDelete, onClose }) {
   const line = { borderColor: C.line, color: C.ink };
 
   return (
-    <div
-      style={{ background: "rgba(9, 21, 36, 0.55)" }}
-      className="fixed inset-0 z-[60] flex items-start sm:items-center justify-center p-3 sm:p-6 overflow-y-auto"
-      onClick={(e) => { if (e.target === e.currentTarget && !busy) onClose(); }}
-    >
-      <form
-        onSubmit={submit}
-        role="dialog"
-        aria-label={task ? `Edit ${task.id}` : "New work"}
-        style={{ background: C.paper, borderColor: C.line }}
-        className="w-full max-w-2xl border rounded-lg shadow-xl"
-      >
-        <div style={{ background: C.navy }} className="flex items-center justify-between px-5 py-4 rounded-t-lg">
-          <div>
-            <div style={{ color: C.orange }} className="f-mono text-[10px] font-semibold tracking-wider uppercase">
-              {task ? task.id : "Work Order"}
-            </div>
-            <h2 style={{ color: C.paper }} className="f-display text-lg font-bold">{task ? "Edit Work" : "New Work"}</h2>
-          </div>
-          <button type="button" onClick={onClose} disabled={busy} aria-label="Close" style={{ color: C.paper }} className="p-1 rounded hover:opacity-80">
-            <X size={20} />
-          </button>
+    <Modal
+      label={task ? `Edit ${task.id}` : "New work"}
+      kicker={task ? task.id : "Work Order"}
+      title={task ? "Edit Work" : "New Work"}
+      busy={busy}
+      onClose={onClose}
+      onSubmit={submit}
+      footer={<>
+        <div>
+          {task && <DeleteControl question="Delete this work permanently?" busy={busy} onConfirm={() => run(() => onDelete(task.id))} />}
         </div>
-
+        <DialogButtons busy={busy} onClose={onClose} saveLabel={task ? "Save Changes" : "Add Work"} />
+      </>}
+    >
         <div className="p-5 grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div className="sm:col-span-2">
             <Field label="Work name" required>
@@ -532,43 +606,9 @@ function WorkForm({ task, employees, onSave, onDelete, onClose }) {
             </Field>
           </div>
 
-          {error && (
-            <div role="alert" style={{ borderColor: C.orangeDeep, background: "#FDF0EA", color: C.orangeDeep }} className="sm:col-span-2 border rounded-md px-3 py-2 f-body text-sm">
-              {error}
-            </div>
-          )}
+          <DialogError error={error} />
         </div>
-
-        <div style={{ borderColor: C.line }} className="border-t px-5 py-4 flex items-center justify-between gap-3 flex-wrap">
-          <div>
-            {task && !confirmDelete && (
-              <button type="button" onClick={() => setConfirmDelete(true)} disabled={busy} style={{ color: C.orangeDeep }} className="f-body text-xs font-semibold flex items-center gap-1.5 px-2 py-2 rounded hover:bg-orange-50">
-                <Trash2 size={14} /> Delete
-              </button>
-            )}
-            {task && confirmDelete && (
-              <div className="flex items-center gap-2">
-                <span style={{ color: C.orangeDeep }} className="f-body text-xs font-semibold">Delete this work permanently?</span>
-                <button type="button" onClick={() => run(() => onDelete(task.id))} disabled={busy} style={{ background: C.orangeDeep, color: C.paper }} className="f-body text-xs font-semibold px-3 py-1.5 rounded">
-                  Yes, delete
-                </button>
-                <button type="button" onClick={() => setConfirmDelete(false)} disabled={busy} style={{ borderColor: C.line, color: C.ink }} className="f-body text-xs px-3 py-1.5 rounded border bg-white">
-                  No
-                </button>
-              </div>
-            )}
-          </div>
-          <div className="flex items-center gap-2 ml-auto">
-            <button type="button" onClick={onClose} disabled={busy} style={{ borderColor: C.line, color: C.ink }} className="f-body text-sm px-4 py-2 rounded border bg-white">
-              Cancel
-            </button>
-            <button type="submit" disabled={busy} style={{ background: C.orange, color: C.paper }} className="f-body text-sm font-semibold px-5 py-2 rounded shadow-sm hover:opacity-90 disabled:opacity-60">
-              {busy ? "Saving…" : task ? "Save Changes" : "Add Work"}
-            </button>
-          </div>
-        </div>
-      </form>
-    </div>
+    </Modal>
   );
 }
 
@@ -787,7 +827,7 @@ function WorkBoard() {
 /* ---------------------------------------------------------------
    PAYMENTS / RECEIVABLES PAGE
 ------------------------------------------------------------------*/
-function ClientCard({ client, onCallLogged, busy }) {
+function ClientCard({ client, onCallLogged, onEdit, onPayment, busy }) {
   const meta = PAY_STATUS_META[client.status];
   return (
     <div style={{ background: C.card, borderColor: C.line }} className="border rounded-md p-5 shadow-sm flex flex-col justify-between">
@@ -797,9 +837,19 @@ function ClientCard({ client, onCallLogged, busy }) {
             <h3 style={{ color: C.ink }} className="f-display text-base font-bold">{client.name}</h3>
             <div style={{ color: C.steel }} className="f-body text-xs mt-0.5">{client.contact} &nbsp;•&nbsp; {client.phone}</div>
           </div>
-          <span style={{ background: meta.bg, color: meta.color }} className="f-mono text-[10px] font-bold px-2.5 py-1 rounded shrink-0 uppercase tracking-wide">
-            {meta.label}
-          </span>
+          <div className="flex items-center gap-1 shrink-0">
+            <span style={{ background: meta.bg, color: meta.color }} className="f-mono text-[10px] font-bold px-2.5 py-1 rounded uppercase tracking-wide">
+              {meta.label}
+            </span>
+            <button
+              onClick={() => onEdit(client)}
+              aria-label={`Edit ${client.name}`}
+              style={{ color: C.steel }}
+              className="p-1 rounded hover:bg-stone-100 active:scale-95 transition-transform"
+            >
+              <Pencil size={13} />
+            </button>
+          </div>
         </div>
 
         <div className="grid grid-cols-2 gap-3 mb-4">
@@ -822,14 +872,23 @@ function ClientCard({ client, onCallLogged, busy }) {
             <Clock size={13} style={{ color: C.blue }} /> Last contacted: <strong className="text-stone-700">{daysAgo(client.lastCall)}</strong>
           </div>
           {client.due > 0 && (
-            <button
-              onClick={() => onCallLogged(client.id)}
-              disabled={busy}
-              style={{ background: C.navy, color: C.paper }}
-              className="f-body text-xs font-semibold px-3 py-1.5 rounded flex items-center gap-1.5 shadow-sm hover:opacity-90 active:scale-95 transition-all disabled:opacity-50"
-            >
-              <PhoneCall size={13} /> Log Reminder
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => onPayment(client)}
+                style={{ borderColor: C.green, color: C.green }}
+                className="f-body text-xs font-semibold px-3 py-1.5 rounded border bg-white flex items-center gap-1 shadow-sm hover:bg-stone-50 active:scale-95 transition-all"
+              >
+                <IndianRupee size={12} /> Record Payment
+              </button>
+              <button
+                onClick={() => onCallLogged(client.id)}
+                disabled={busy}
+                style={{ background: C.navy, color: C.paper }}
+                className="f-body text-xs font-semibold px-3 py-1.5 rounded flex items-center gap-1.5 shadow-sm hover:opacity-90 active:scale-95 transition-all disabled:opacity-50"
+              >
+                <PhoneCall size={13} /> Log Reminder
+              </button>
+            </div>
           )}
         </div>
 
@@ -843,6 +902,127 @@ function ClientCard({ client, onCallLogged, busy }) {
   );
 }
 
+const EMPTY_CLIENT = { name: "", contact: "", phone: "", due: "", invoiceDate: "", status: "due-soon", notes: "" };
+
+// Create (client = null) or edit a client. onSave and onDelete return promises.
+function ClientForm({ client, onSave, onDelete, onClose }) {
+  const [form, setForm] = useState(() => (
+    client
+      ? { ...EMPTY_CLIENT, ...Object.fromEntries(Object.keys(EMPTY_CLIENT).map((k) => [k, client[k] ?? ""])), due: String(client.due) }
+      : { ...EMPTY_CLIENT, invoiceDate: localDay() }
+  ));
+  const { busy, error, setError, run } = useDialogAction(onClose);
+  const set = (key) => (e) => setForm((f) => ({ ...f, [key]: e.target.value }));
+
+  const submit = (e) => {
+    e.preventDefault();
+    const problem = clientFormError(form);
+    if (problem) { setError(problem); return; }
+    run(() => onSave(form));
+  };
+
+  const line = { borderColor: C.line, color: C.ink };
+  const settled = parseRupees(form.due) === 0;
+
+  return (
+    <Modal
+      label={client ? `Edit ${client.name}` : "New client"}
+      kicker={client ? "Receivable" : "New Receivable"}
+      title={client ? "Edit Client" : "Add Client"}
+      busy={busy}
+      onClose={onClose}
+      onSubmit={submit}
+      footer={<>
+        <div>
+          {client && <DeleteControl question="Delete this client permanently?" busy={busy} onConfirm={() => run(() => onDelete(client.id))} />}
+        </div>
+        <DialogButtons busy={busy} onClose={onClose} saveLabel={client ? "Save Changes" : "Add Client"} />
+      </>}
+    >
+      <div className="p-5 grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div className="sm:col-span-2">
+          <Field label="Client name" required>
+            <input name="name" value={form.name} onChange={set("name")} required autoFocus style={line} className={INPUT_CLASS} />
+          </Field>
+        </div>
+        <Field label="Contact person" required>
+          <input name="contact" value={form.contact} onChange={set("contact")} required style={line} className={INPUT_CLASS} />
+        </Field>
+        <Field label="Phone" required>
+          <input name="phone" type="tel" value={form.phone} onChange={set("phone")} required style={line} className={INPUT_CLASS} placeholder="+91" />
+        </Field>
+        <Field label="Outstanding amount (₹)" required>
+          <input name="due" inputMode="numeric" value={form.due} onChange={set("due")} required style={line} className={INPUT_CLASS} placeholder="0" />
+        </Field>
+        <Field label="Invoice date" required>
+          <input name="invoiceDate" type="date" value={form.invoiceDate} onChange={set("invoiceDate")} required style={line} className={INPUT_CLASS} />
+        </Field>
+        <div className="sm:col-span-2">
+          <Field label="Status" required>
+            <select name="status" value={settled ? "paid" : form.status} onChange={set("status")} disabled={settled} style={line} className={INPUT_CLASS}>
+              {["overdue", "due-soon", "paid"].map((st) => <option key={st} value={st}>{PAY_STATUS_META[st].label}</option>)}
+            </select>
+          </Field>
+          {settled && <p style={{ color: C.steel }} className="f-body text-xs mt-1">Nothing outstanding, so this client is marked as paid.</p>}
+        </div>
+        <div className="sm:col-span-2">
+          <Field label="Notes">
+            <textarea name="notes" value={form.notes} onChange={set("notes")} rows={3} style={line} className={INPUT_CLASS} />
+          </Field>
+        </div>
+        <DialogError error={error} />
+      </div>
+    </Modal>
+  );
+}
+
+// Record an amount received from a client. onSave returns a promise.
+function PaymentForm({ client, onSave, onClose }) {
+  const [amount, setAmount] = useState("");
+  const { busy, error, setError, run } = useDialogAction(onClose);
+  const paid = parseRupees(amount);
+  const remaining = Number.isNaN(paid) || paid > client.due ? null : client.due - paid;
+
+  const submit = (e) => {
+    e.preventDefault();
+    const problem = paymentError(client, amount);
+    if (problem) { setError(problem); return; }
+    run(() => onSave(client, amount));
+  };
+
+  return (
+    <Modal
+      label={`Record payment from ${client.name}`}
+      kicker="Payment Received"
+      title={client.name}
+      busy={busy}
+      onClose={onClose}
+      onSubmit={submit}
+      width="max-w-md"
+      footer={<DialogButtons busy={busy} onClose={onClose} saveLabel="Record Payment" />}
+    >
+      <div className="p-5 grid grid-cols-1 gap-4">
+        <div style={{ background: C.card, borderColor: C.line }} className="border rounded p-3 flex items-center justify-between">
+          <span style={{ color: C.steel }} className="f-mono text-[10px] uppercase tracking-wider">Outstanding</span>
+          <span style={{ color: C.orangeDeep }} className="f-display text-lg font-bold">{fmtINR(client.due)}</span>
+        </div>
+        <Field label="Amount received (₹)" required>
+          <input name="amount" inputMode="numeric" value={amount} onChange={(e) => setAmount(e.target.value)} required autoFocus style={{ borderColor: C.line, color: C.ink }} className={INPUT_CLASS} />
+        </Field>
+        <button type="button" onClick={() => setAmount(String(client.due))} style={{ color: C.blue }} className="f-body text-xs font-semibold text-left -mt-2">
+          Paid in full ({fmtINR(client.due)})
+        </button>
+        {remaining !== null && paid > 0 && (
+          <p data-testid="remaining" style={{ color: remaining === 0 ? C.green : C.steel }} className="f-body text-sm">
+            {remaining === 0 ? "This clears the account. It will be marked as paid." : `${fmtINR(remaining)} will remain outstanding.`}
+          </p>
+        )}
+        <DialogError error={error} />
+      </div>
+    </Modal>
+  );
+}
+
 function Payments() {
   const useApi = hasApi();
   const [clients, setClients] = useState(useApi ? [] : INITIAL_CLIENTS);
@@ -853,6 +1033,33 @@ function Payments() {
   const [filter, setFilter] = useState("all");
   // The viewer's own calendar day, so "Today" is right before 05:30 IST too.
   const today = localDay();
+  // null = closed, "new" = adding, a client = editing it.
+  const [editing, setEditing] = useState(null);
+  const [paying, setPaying] = useState(null);
+
+  const replaceClient = (id, changes) => setClients((prev) => prev.map((c) => (c.id === id ? { ...c, ...changes } : c)));
+
+  // These return promises so the dialogs can show a failure and stay open.
+  const saveClient = async (form) => {
+    if (editing === "new") {
+      const created = useApi
+        ? await createClient(form)
+        : { ...clientToApi(form), id: nextLocalClientId(clients), lastCall: today };
+      setClients((prev) => [...prev, created]);
+    } else {
+      const id = editing.id;
+      replaceClient(id, useApi ? await updateClient(id, form) : clientToApi(form));
+    }
+  };
+
+  const removeClient = async (id) => {
+    if (useApi) await deleteClient(id);
+    setClients((prev) => prev.filter((c) => c.id !== id));
+  };
+
+  const savePayment = async (client, amount) => {
+    replaceClient(client.id, useApi ? await recordPayment(client, amount) : paymentPatchBody(client, amount));
+  };
 
   useEffect(() => {
     if (!useApi) return undefined;
@@ -904,9 +1111,20 @@ function Payments() {
   return (
     <div style={{ background: C.paper }} className="min-h-[calc(100vh-4rem)] grid-bg py-6 sm:py-10">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <div className="mb-6">
-          <div style={{ color: C.orangeDeep }} className="f-mono text-xs font-semibold tracking-wider uppercase mb-1">Financial Log</div>
-          <h1 style={{ color: C.ink }} className="f-display text-2xl sm:text-3xl font-bold">Payment Receivables &amp; Follow-ups</h1>
+        <div className="mb-6 flex items-end justify-between gap-4 flex-wrap">
+          <div>
+            <div style={{ color: C.orangeDeep }} className="f-mono text-xs font-semibold tracking-wider uppercase mb-1">Financial Log</div>
+            <h1 style={{ color: C.ink }} className="f-display text-2xl sm:text-3xl font-bold">Payment Receivables &amp; Follow-ups</h1>
+          </div>
+          {load.state === "ready" && (
+            <button
+              onClick={() => setEditing("new")}
+              style={{ background: C.orange, color: C.paper }}
+              className="f-body text-sm font-semibold px-4 py-2 rounded shadow-sm hover:opacity-90 active:scale-95 transition-all inline-flex items-center gap-1.5"
+            >
+              <Plus size={16} /> Add Client
+            </button>
+          )}
         </div>
 
         {load.state === "loading" && (
@@ -977,11 +1195,22 @@ function Payments() {
 
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
           {visible.map((c) => (
-            <ClientCard key={c.id} client={c} onCallLogged={logCall} busy={saving.has(c.id)} />
+            <ClientCard key={c.id} client={c} onCallLogged={logCall} onEdit={setEditing} onPayment={setPaying} busy={saving.has(c.id)} />
           ))}
         </div>
         </>)}
       </div>
+
+      {editing && (
+        <ClientForm
+          key={editing === "new" ? "new" : editing.id}
+          client={editing === "new" ? null : editing}
+          onSave={saveClient}
+          onDelete={removeClient}
+          onClose={() => setEditing(null)}
+        />
+      )}
+      {paying && <PaymentForm key={paying.id} client={paying} onSave={savePayment} onClose={() => setPaying(null)} />}
     </div>
   );
 }

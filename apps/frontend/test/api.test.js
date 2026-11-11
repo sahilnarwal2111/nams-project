@@ -9,6 +9,12 @@ import {
   taskToApi,
   taskFromForm,
   nextLocalTaskId,
+  parseRupees,
+  clientFormError,
+  clientToApi,
+  paymentError,
+  paymentPatchBody,
+  nextLocalClientId,
   dateFromApi,
   instantFromApi,
   localDay,
@@ -188,4 +194,75 @@ test("nextLocalTaskId continues the NK sequence numerically", () => {
   assert.equal(nextLocalTaskId([]), "NK-001");
   assert.equal(nextLocalTaskId([{ id: "NK-101" }, { id: "NK-126" }, { id: "NK-99" }]), "NK-127");
   assert.equal(nextLocalTaskId([{ id: "NK-999" }, { id: "other" }]), "NK-1000");
+});
+
+const clientForm = {
+  name: " Hisar Developers ",
+  contact: " R. Punia ",
+  phone: " +91 90000 22222 ",
+  due: "1,25,000",
+  invoiceDate: "2026-11-01",
+  status: "due-soon",
+  notes: "  ",
+};
+
+test("parseRupees reads whole rupees and rejects everything else", () => {
+  assert.equal(parseRupees("1,84,000"), 184000);
+  assert.equal(parseRupees(" ₹ 500 "), 500);
+  assert.equal(parseRupees("0"), 0);
+  assert.equal(parseRupees(96000), 96000);
+  for (const bad of ["", "  ", "-5", "10.5", "abc", "1e3", null, undefined]) {
+    assert.ok(Number.isNaN(parseRupees(bad)), `expected NaN for ${JSON.stringify(bad)}`);
+  }
+});
+
+test("clientFormError accepts a valid form and names each problem", () => {
+  assert.equal(clientFormError(clientForm), null);
+  assert.match(clientFormError({ ...clientForm, name: "  " }), /required/);
+  assert.match(clientFormError({ ...clientForm, phone: "" }), /required/);
+  assert.match(clientFormError({ ...clientForm, due: "12.5" }), /whole number/);
+  assert.match(clientFormError({ ...clientForm, due: "" }), /whole number/);
+  assert.match(clientFormError({ ...clientForm, invoiceDate: "" }), /Invoice date/);
+  assert.match(clientFormError({ ...clientForm, status: "paid" }), /cannot be marked as paid/);
+  assert.equal(clientFormError({ ...clientForm, due: "0", status: "paid" }), null);
+});
+
+test("clientToApi trims text, parses the amount and sends blank notes as null", () => {
+  assert.deepEqual(clientToApi(clientForm), {
+    name: "Hisar Developers",
+    contact: "R. Punia",
+    phone: "+91 90000 22222",
+    due: 125000,
+    invoiceDate: "2026-11-01",
+    status: "due-soon",
+    notes: null,
+  });
+});
+
+test("clientToApi marks a client who owes nothing as paid and never sends lastCall", () => {
+  const body = clientToApi({ ...clientForm, due: "0", status: "overdue", lastCall: "2026-01-01" });
+  assert.equal(body.status, "paid");
+  assert.equal(body.due, 0);
+  assert.equal("lastCall" in body, false);
+});
+
+test("paymentError checks the amount against the dues", () => {
+  const client = { id: "c1", due: 50000, status: "overdue" };
+  assert.equal(paymentError(client, "20,000"), null);
+  assert.equal(paymentError(client, "50000"), null);
+  assert.match(paymentError(client, "50001"), /more than/);
+  assert.match(paymentError(client, "0"), /amount received/);
+  assert.match(paymentError(client, ""), /amount received/);
+  assert.match(paymentError(client, "-10"), /amount received/);
+});
+
+test("paymentPatchBody reduces the dues and marks a cleared account as paid", () => {
+  const client = { id: "c1", due: 50000, status: "overdue" };
+  assert.deepEqual(paymentPatchBody(client, "20,000"), { due: 30000 });
+  assert.deepEqual(paymentPatchBody(client, "50000"), { due: 0, status: "paid" });
+});
+
+test("nextLocalClientId continues the c# sequence numerically", () => {
+  assert.equal(nextLocalClientId([]), "c1");
+  assert.equal(nextLocalClientId([{ id: "c1" }, { id: "c6" }, { id: "c10" }, { id: "x" }]), "c11");
 });
