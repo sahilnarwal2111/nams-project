@@ -144,3 +144,14 @@ export async function updateClient(req, res) {
     throw err;
   }
 }
+
+export async function deleteClient(req, res) {
+  const { id } = req.params;
+  try {
+    await prisma.client.delete({ where: { id } });
+    res.status(204).end();
+  } catch (err) {
+    if (err.code === "P2025") return res.status(404).json({ error: `Client ${id} not found` });
+    throw err;
+  }
+}
