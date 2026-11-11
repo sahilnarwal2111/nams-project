@@ -1,4 +1,5 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
+import { hasApi, fetchEmployees, fetchTasks, updateTaskStatus } from "./api.js";
 import {
   Ruler, Route, Building2, Droplets, Plane, Waves,
   Menu, X, ChevronRight, Clock, PhoneCall,
@@ -297,8 +298,8 @@ function Landing({ setPage }) {
 /* ---------------------------------------------------------------
    WORK BOARD
 ------------------------------------------------------------------*/
-function TaskCard({ task, onMove }) {
-  const emp = EMPLOYEES.find((e) => e.id === task.assignee);
+function TaskCard({ task, employees, onMove }) {
+  const emp = employees.find((e) => e.id === task.assignee);
   const pr = PRIORITY_META[task.priority];
   const order = ["todo", "inprogress", "done"];
   const idx = order.indexOf(task.status);
@@ -348,10 +349,48 @@ function TaskCard({ task, onMove }) {
 }
 
 function WorkBoard() {
-  const [tasks, setTasks] = useState(INITIAL_TASKS);
+  const useApi = hasApi();
+  const [tasks, setTasks] = useState(useApi ? [] : INITIAL_TASKS);
+  const [employees, setEmployees] = useState(useApi ? [] : EMPLOYEES);
+  const [load, setLoad] = useState(useApi ? { state: "loading" } : { state: "ready" });
+  const [attempt, setAttempt] = useState(0);
+  const [saveError, setSaveError] = useState(null);
   const [filter, setFilter] = useState("all");
 
-  const moveTask = (id, status) => setTasks((prev) => prev.map((t) => (t.id === id ? { ...t, status } : t)));
+  useEffect(() => {
+    if (!useApi) return undefined;
+    let cancelled = false;
+    Promise.all([fetchEmployees(), fetchTasks()])
+      .then(([emps, tks]) => {
+        if (cancelled) return;
+        setEmployees(emps);
+        setTasks(tks);
+        setLoad({ state: "ready" });
+      })
+      .catch((err) => {
+        if (!cancelled) setLoad({ state: "error", message: err.message });
+      });
+    return () => { cancelled = true; };
+  }, [useApi, attempt]);
+
+  const retry = () => {
+    setLoad({ state: "loading" });
+    setAttempt((a) => a + 1);
+  };
+
+  const setStatus = (id, status) => setTasks((prev) => prev.map((t) => (t.id === id ? { ...t, status } : t)));
+
+  const moveTask = (id, status) => {
+    const prevStatus = tasks.find((t) => t.id === id)?.status;
+    if (prevStatus === undefined || prevStatus === status) return;
+    setSaveError(null);
+    setStatus(id, status);
+    if (!useApi) return;
+    updateTaskStatus(id, status).catch((err) => {
+      setStatus(id, prevStatus);
+      setSaveError(`Could not save the move for ${id}; it was put back. ${err.message}`);
+    });
+  };
 
   const visible = useMemo(() => (filter === "all" ? tasks : tasks.filter((t) => t.assignee === filter)), [tasks, filter]);
   const columns = ["todo", "inprogress", "done"];
@@ -378,6 +417,33 @@ function WorkBoard() {
           </div>
         </div>
 
+        {load.state === "loading" && (
+          <div style={{ borderColor: C.line, color: C.steel, background: C.card }} className="border rounded-md p-10 text-center f-body text-sm">
+            Loading work board…
+          </div>
+        )}
+
+        {load.state === "error" && (
+          <div style={{ borderColor: C.orangeDeep, background: "#FDF0EA" }} className="border rounded-md p-6 text-center">
+            <p style={{ color: C.orangeDeep }} className="f-body text-sm mb-3">Could not load the work board. {load.message}</p>
+            <button
+              onClick={retry}
+              style={{ background: C.navy, color: C.paper }}
+              className="f-body text-xs font-semibold px-4 py-2 rounded shadow-sm hover:opacity-90"
+            >
+              Retry
+            </button>
+          </div>
+        )}
+
+        {load.state === "ready" && (<>
+        {saveError && (
+          <div role="alert" style={{ borderColor: C.orangeDeep, background: "#FDF0EA", color: C.orangeDeep }} className="border rounded-md px-4 py-3 mb-4 f-body text-sm flex items-start justify-between gap-3">
+            <span>{saveError}</span>
+            <button onClick={() => setSaveError(null)} aria-label="Dismiss" className="shrink-0"><X size={16} /></button>
+          </div>
+        )}
+
         {/* Filter Bar */}
         <div className="flex items-center gap-2 mb-6 overflow-x-auto pb-2 no-scrollbar">
           <span className="f-mono text-xs text-stone-500 flex items-center gap-1 shrink-0 mr-1">
@@ -394,7 +460,7 @@ function WorkBoard() {
           >
             All Staff
           </button>
-          {EMPLOYEES.map((e) => (
+          {employees.map((e) => (
             <button
               key={e.id}
               onClick={() => setFilter(e.id)}
@@ -428,7 +494,7 @@ function WorkBoard() {
 
                 <div className="min-h-[250px]">
                   {colTasks.map((t) => (
-                    <TaskCard key={t.id} task={t} onMove={moveTask} />
+                    <TaskCard key={t.id} task={t} employees={employees} onMove={moveTask} />
                   ))}
                   {colTasks.length === 0 && (
                     <div style={{ borderColor: C.line, color: C.steel }} className="border border-dashed rounded-md p-8 text-center f-body text-xs">
@@ -440,6 +506,7 @@ function WorkBoard() {
             );
           })}
         </div>
+        </>)}
       </div>
     </div>
   );
