@@ -5,7 +5,7 @@ import {
   createClient, updateClient, deleteClient, recordPayment, fetchPayments,
   clientToApi, clientFormError, paymentError, paymentPatchBody, parseRupees, nextLocalClientId,
   fetchSession, login, logout, onAuthLost,
-  daysAgo, enquiryError, sendEnquiry, fetchEnquiries, updateEnquiryStatus, deleteEnquiry,
+  daysAgo, paymentPending, enquiryError, sendEnquiry, fetchEnquiries, updateEnquiryStatus, deleteEnquiry,
 } from "./api.js";
 import { filterTasks, sortTasks, isOverdue, SORT_MODES } from "./board.js";
 import {
@@ -1006,8 +1006,11 @@ function WorkBoard() {
 /* ---------------------------------------------------------------
    PAYMENTS / RECEIVABLES PAGE
 ------------------------------------------------------------------*/
-function ClientCard({ client, onCallLogged, onEdit, onPayment, onHistory, busy }) {
+// isAdmin decides whether amounts and the money actions are shown. Staff see
+// only whether payment is received or pending.
+function ClientCard({ client, onCallLogged, onEdit, onPayment, onHistory, busy, isAdmin }) {
   const meta = PAY_STATUS_META[client.status];
+  const pending = paymentPending(client);
   return (
     <div style={{ background: C.card, borderColor: C.line }} className="border rounded-md p-5 shadow-sm flex flex-col justify-between">
       <div>
@@ -1020,6 +1023,7 @@ function ClientCard({ client, onCallLogged, onEdit, onPayment, onHistory, busy }
             <span style={{ background: meta.bg, color: meta.color }} className="f-mono text-[10px] font-bold px-2.5 py-1 rounded uppercase tracking-wide">
               {meta.label}
             </span>
+            {isAdmin && (<>
             <button
               onClick={() => onHistory(client)}
               aria-label={`Payment history for ${client.name}`}
@@ -1037,14 +1041,15 @@ function ClientCard({ client, onCallLogged, onEdit, onPayment, onHistory, busy }
             >
               <Pencil size={13} />
             </button>
+            </>)}
           </div>
         </div>
 
         <div className="grid grid-cols-2 gap-3 mb-4">
           <div style={{ background: C.paper }} className="rounded p-3 border border-stone-200/60">
-            <div style={{ color: C.steel }} className="f-mono text-[10px] uppercase tracking-wider mb-1">Outstanding</div>
-            <div style={{ color: client.due > 0 ? C.orangeDeep : C.green }} className="f-display text-lg font-bold">
-              {client.due > 0 ? fmtINR(client.due) : "Settled"}
+            <div style={{ color: C.steel }} className="f-mono text-[10px] uppercase tracking-wider mb-1">{isAdmin ? "Outstanding" : "Payment"}</div>
+            <div data-testid="client-amount" style={{ color: pending ? C.orangeDeep : C.green }} className="f-display text-lg font-bold">
+              {isAdmin ? (pending ? fmtINR(client.due) : "Settled") : (pending ? "Pending" : "Received")}
             </div>
           </div>
           <div style={{ background: C.paper }} className="rounded p-3 border border-stone-200/60">
@@ -1059,15 +1064,15 @@ function ClientCard({ client, onCallLogged, onEdit, onPayment, onHistory, busy }
           <div style={{ color: C.steel }} className="f-body text-xs flex items-center gap-1.5">
             <Clock size={13} style={{ color: C.blue }} /> Last contacted: <strong className="text-stone-700">{daysAgo(client.lastCall)}</strong>
           </div>
-          {client.due > 0 && (
+          {pending && (
             <div className="flex items-center gap-2">
-              <button
+              {isAdmin && <button
                 onClick={() => onPayment(client)}
                 style={{ borderColor: C.green, color: C.green }}
                 className="f-body text-xs font-semibold px-3 py-1.5 rounded border bg-white flex items-center gap-1 shadow-sm hover:bg-stone-50 active:scale-95 transition-all"
               >
                 <IndianRupee size={12} /> Record Payment
-              </button>
+              </button>}
               <button
                 onClick={() => onCallLogged(client.id)}
                 disabled={busy}
@@ -1277,7 +1282,7 @@ function PaymentHistory({ client, load, onClose }) {
   );
 }
 
-function Payments() {
+function Payments({ isAdmin }) {
   const useApi = hasApi();
   const [clients, setClients] = useState(useApi ? [] : INITIAL_CLIENTS);
   const [load, setLoad] = useState(useApi ? { state: "loading" } : { state: "ready" });
@@ -1375,7 +1380,8 @@ function Payments() {
       .finally(() => setSaving((prev) => { const next = new Set(prev); next.delete(id); return next; }));
   };
 
-  const totalDue = clients.reduce((s, c) => s + c.due, 0);
+  const totalDue = isAdmin ? clients.reduce((s, c) => s + c.due, 0) : 0;
+  const pendingCount = clients.filter(paymentPending).length;
   const overdueCount = clients.filter((c) => c.status === "overdue").length;
   const calledToday = clients.filter((c) => c.lastCall === today).length;
 
@@ -1389,7 +1395,7 @@ function Payments() {
             <div style={{ color: C.orangeDeep }} className="f-mono text-xs font-semibold tracking-wider uppercase mb-1">Financial Log</div>
             <h1 style={{ color: C.ink }} className="f-display text-2xl sm:text-3xl font-bold">Payment Receivables &amp; Follow-ups</h1>
           </div>
-          {load.state === "ready" && (
+          {load.state === "ready" && isAdmin && (
             <button
               onClick={() => setEditing("new")}
               style={{ background: C.orange, color: C.paper }}
@@ -1429,8 +1435,10 @@ function Payments() {
 
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-8">
           <div style={{ background: C.navy }} className="rounded-md p-5 shadow-sm text-white">
-            <div style={{ color: C.blueLight }} className="f-mono text-xs uppercase tracking-wider mb-1">Total Outstanding</div>
-            <div className="f-display text-2xl sm:text-3xl font-bold">{fmtINR(totalDue)}</div>
+            <div style={{ color: C.blueLight }} className="f-mono text-xs uppercase tracking-wider mb-1">{isAdmin ? "Total Outstanding" : "Payments Pending"}</div>
+            <div data-testid="total-tile" className="f-display text-2xl sm:text-3xl font-bold">
+              {isAdmin ? fmtINR(totalDue) : <>{pendingCount} <span className="text-sm font-normal opacity-70">of {clients.length} clients</span></>}
+            </div>
           </div>
           <div style={{ background: C.card, borderColor: C.line }} className="border rounded-md p-5 shadow-sm">
             <div style={{ color: C.steel }} className="f-mono text-xs uppercase tracking-wider mb-1">Overdue Accounts</div>
@@ -1439,7 +1447,7 @@ function Payments() {
           <div style={{ background: C.card, borderColor: C.line }} className="border rounded-md p-5 shadow-sm">
             <div style={{ color: C.steel }} className="f-mono text-xs uppercase tracking-wider mb-1">Followed Up Today</div>
             <div style={{ color: C.green }} className="f-display text-2xl sm:text-3xl font-bold">
-              {calledToday} <span className="text-sm font-normal text-stone-500">/ {clients.filter(c => c.due > 0).length} pending</span>
+              {calledToday} <span className="text-sm font-normal text-stone-500">/ {pendingCount} pending</span>
             </div>
           </div>
         </div>
@@ -1468,7 +1476,7 @@ function Payments() {
 
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
           {visible.map((c) => (
-            <ClientCard key={c.id} client={c} onCallLogged={logCall} onEdit={setEditing} onPayment={setPaying} onHistory={setHistory} busy={saving.has(c.id)} />
+            <ClientCard key={c.id} client={c} onCallLogged={logCall} onEdit={setEditing} onPayment={setPaying} onHistory={setHistory} busy={saving.has(c.id)} isAdmin={isAdmin} />
           ))}
         </div>
         </>)}
@@ -1691,24 +1699,26 @@ function Enquiries({ local, setLocal }) {
 // password set), "checking", "login", "signedIn" or "error".
 function useStaffSession() {
   const useApi = hasApi();
-  const [session, setSession] = useState(useApi ? { state: "checking" } : { state: "open" });
+  // role is "admin" or "staff"; without an API there is no sign-in and everything shows.
+  const [session, setSession] = useState(useApi ? { state: "checking", role: "staff" } : { state: "open", role: "admin" });
   const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     if (!useApi) return undefined;
     let cancelled = false;
     fetchSession()
-      .then((state) => { if (!cancelled) setSession({ state }); })
-      .catch((err) => { if (!cancelled) setSession({ state: "error", message: err.message }); });
-    const stopListening = onAuthLost(() => setSession({ state: "login" }));
+      .then((found) => { if (!cancelled) setSession(found); })
+      .catch((err) => { if (!cancelled) setSession({ state: "error", role: "staff", message: err.message }); });
+    const stopListening = onAuthLost(() => setSession({ state: "login", role: "staff" }));
     return () => { cancelled = true; stopListening(); };
   }, [useApi, attempt]);
 
   return {
     session,
-    signIn: async (password) => { await login(password); setSession({ state: "signedIn" }); },
-    signOut: () => { logout(); setSession({ state: "login" }); },
-    retry: () => { setSession({ state: "checking" }); setAttempt((a) => a + 1); },
+    isAdmin: session.role === "admin",
+    signIn: async (password) => { const role = await login(password); setSession({ state: "signedIn", role }); },
+    signOut: () => { logout(); setSession({ state: "login", role: "staff" }); },
+    retry: () => { setSession({ state: "checking", role: "staff" }); setAttempt((a) => a + 1); },
   };
 }
 
@@ -1732,7 +1742,7 @@ function SignIn({ onSignIn }) {
       <div style={{ color: C.orangeDeep }} className="f-mono text-xs font-semibold tracking-wider uppercase mb-1">Staff Only</div>
       <h1 style={{ color: C.ink }} className="f-display text-xl font-bold mb-1">Sign in to continue</h1>
       <p style={{ color: C.steel }} className="f-body text-sm mb-5">The work board and receivables are for NK Consultancy staff.</p>
-      <Field label="Office password" required>
+      <Field label="Password" required>
         <input
           name="password" type="password" autoComplete="current-password" value={password}
           onChange={(e) => setPassword(e.target.value)} required autoFocus
@@ -1798,7 +1808,7 @@ export default function App() {
       <main>
         {page === "home" && <Landing setPage={setPage} onEnquiry={hasApi() ? sendEnquiry : sendLocalEnquiry} />}
         {page === "work" && <StaffOnly staff={staff}><WorkBoard /></StaffOnly>}
-        {page === "payments" && <StaffOnly staff={staff}><Payments /></StaffOnly>}
+        {page === "payments" && <StaffOnly staff={staff}><Payments key={staff.session.role} isAdmin={staff.isAdmin} /></StaffOnly>}
         {page === "enquiries" && <StaffOnly staff={staff}><Enquiries local={localEnquiries} setLocal={setLocalEnquiries} /></StaffOnly>}
       </main>
     </div>
