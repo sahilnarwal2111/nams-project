@@ -1295,7 +1295,7 @@ test("only an admin can set or remove personal passwords, and short ones are ref
   });
 });
 
-test("a person can edit and move their own work but not anyone else's", async () => {
+test("a person can edit the details of their own work but not anyone else's", async () => {
   const mine = await prisma.task.findUnique({ where: { id: "NK-102" } }); // Ankit's
   const theirs = await prisma.task.findUnique({ where: { id: "NK-105" } }); // Rajesh's
   try {
@@ -1303,12 +1303,9 @@ test("a person can edit and move their own work but not anyone else's", async ()
       const edit = await authed("/api/tasks/NK-102", ankit, jsonBody("PATCH", { title: "Boundary survey (Ankit edit)", details: "Took GPS" }));
       assert.equal(edit.status, 200);
       assert.equal((await edit.json()).title, "Boundary survey (Ankit edit)");
-      const move = await authed("/api/tasks/NK-102", ankit, jsonBody("PATCH", { status: "inprogress" }));
-      assert.equal(move.status, 200);
-      assert.equal((await move.json()).status, "inprogress");
       assert.equal((await authed("/api/tasks/NK-102", ankit, jsonBody("PATCH", { assigneeId: "e6", priority: "high" }))).status, 200, "keeping themselves is fine");
 
-      for (const body of [{ status: "done" }, { title: "Not mine" }]) {
+      for (const body of [{ title: "Not mine" }, { priority: "low" }, { details: "x" }, { status: "done", title: "Sneaked in with a move" }, { workTypes: ["survey"] }]) {
         const res = await authed("/api/tasks/NK-105", ankit, jsonBody("PATCH", body));
         assert.equal(res.status, 403, JSON.stringify(body));
         assert.match((await res.json()).error, /assigned to you/);
@@ -1316,7 +1313,8 @@ test("a person can edit and move their own work but not anyone else's", async ()
       const reassign = await authed("/api/tasks/NK-102", ankit, jsonBody("PATCH", { assigneeId: "e4" }));
       assert.equal(reassign.status, 403);
       assert.match((await reassign.json()).error, /admin/i);
-      assert.equal((await authed("/api/tasks/NK-999", ankit, jsonBody("PATCH", { status: "done" }))).status, 404);
+      assert.equal((await authed("/api/tasks/NK-105", ankit, jsonBody("PATCH", { assigneeId: "e6" }))).status, 403, "cannot take someone else's work");
+      assert.equal((await authed("/api/tasks/NK-999", ankit, jsonBody("PATCH", { title: "x" }))).status, 404);
     });
     const after = await prisma.task.findUnique({ where: { id: "NK-105" } });
     assert.deepEqual(after, theirs, "someone else's work is untouched");
@@ -1327,25 +1325,60 @@ test("a person can edit and move their own work but not anyone else's", async ()
   }
 });
 
-test("only an admin can create or delete work; the office sign-in cannot change any", async () => {
-  const before = await prisma.task.count();
-  const newWork = { title: "Role test work", client: "Nobody", assigneeId: "e6", priority: "low" };
-  await withPeople(async ({ ankit, staff, admin }) => {
-    for (const token of [ankit, staff]) {
-      assert.equal((await authed("/api/tasks", token, jsonBody("POST", newWork))).status, 403);
-      assert.equal((await authed("/api/tasks/NK-102", token, { method: "DELETE" })).status, 403);
-    }
-    const office = await authed("/api/tasks/NK-102", staff, jsonBody("PATCH", { status: "done" }));
-    assert.equal(office.status, 403);
-    assert.match((await office.json()).error, /own name/);
-    assert.equal(await prisma.task.count(), before);
+test("anyone signed in can move any card to any status, and nothing else changes", async () => {
+  const before = await prisma.task.findUnique({ where: { id: "NK-105" } }); // Rajesh's, todo
+  try {
+    await withPeople(async ({ ankit, staff, admin }) => {
+      const steps = [[ankit, "inprogress"], [staff, "done"], [ankit, "todo"], [staff, "inprogress"], [admin, "done"]];
+      for (const [token, status] of steps) {
+        const res = await authed("/api/tasks/NK-105", token, jsonBody("PATCH", { status }));
+        assert.equal(res.status, 200, status);
+        const body = await res.json();
+        assert.equal(body.status, status);
+        assert.equal(body.assigneeId, "e4");
+        assert.equal(body.title, before.title);
+        assert.equal(body.completedAt !== null, status === "done", "completedAt follows the status");
+      }
+      assert.equal((await authed("/api/tasks/NK-105", staff, jsonBody("PATCH", { status: "archived" }))).status, 400);
+      assert.equal((await authed("/api/tasks/NK-999", staff, jsonBody("PATCH", { status: "done" }))).status, 404);
+      assert.equal((await patch("/api/tasks/NK-105", { status: "todo" })).status, 401, "still needs a sign-in");
+    });
+  } finally {
+    const { id, ...data } = before;
+    await prisma.task.update({ where: { id }, data });
+  }
+});
 
-    const created = await authed("/api/tasks", admin, jsonBody("POST", newWork));
-    assert.equal(created.status, 201);
-    const { id } = await created.json();
-    assert.equal((await authed(`/api/tasks/${id}`, admin, jsonBody("PATCH", { assigneeId: "e4", status: "done" }))).status, 200);
-    assert.equal((await authed(`/api/tasks/${id}`, admin, { method: "DELETE" })).status, 204);
-  });
+test("anyone signed in can add work; only an admin deletes it, and the office sign-in cannot edit details", async () => {
+  const before = await prisma.task.count();
+  const newWork = { title: "Role test work", client: "Nobody", assigneeId: "e4", priority: "low" };
+  const made = [];
+  try {
+    await withPeople(async ({ ankit, staff, admin }) => {
+      for (const token of [ankit, staff, admin]) {
+        const created = await authed("/api/tasks", token, jsonBody("POST", newWork));
+        assert.equal(created.status, 201);
+        const task = await created.json();
+        made.push(task.id);
+        assert.equal(task.assigneeId, "e4", "work can be added for someone else");
+        assert.equal(task.status, "todo");
+      }
+      assert.equal((await post("/api/tasks", newWork)).status, 401, "adding still needs a sign-in");
+
+      for (const token of [ankit, staff]) {
+        assert.equal((await authed(`/api/tasks/${made[0]}`, token, { method: "DELETE" })).status, 403);
+      }
+      const office = await authed(`/api/tasks/${made[0]}`, staff, jsonBody("PATCH", { title: "Office edit" }));
+      assert.equal(office.status, 403);
+      assert.match((await office.json()).error, /own name/);
+      assert.equal(await prisma.task.count(), before + 3);
+
+      assert.equal((await authed(`/api/tasks/${made[0]}`, admin, jsonBody("PATCH", { assigneeId: "e6", title: "Admin edit" }))).status, 200);
+      for (const id of made) assert.equal((await authed(`/api/tasks/${id}`, admin, { method: "DELETE" })).status, 204);
+    });
+  } finally {
+    await prisma.task.deleteMany({ where: { title: { in: ["Role test work", "Admin edit", "Office edit"] } } });
+  }
   assert.equal(await prisma.task.count(), before);
 });
 

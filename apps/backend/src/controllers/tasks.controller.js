@@ -148,15 +148,18 @@ export async function updateTask(req, res) {
   if ("title" in data) data.title = data.title.trim();
   if ("client" in data) data.client = data.client.trim();
 
-  // Staff may change only their own work and may not hand it to someone else.
-  if (req.role !== "admin") {
+  // Anyone signed in may move any card: a change of status and nothing else.
+  // Editing the details is for the admin and for the person the work is
+  // assigned to, who may not hand it to someone else.
+  const onlyMoving = Object.keys(data).every((field) => field === "status");
+  if (req.role !== "admin" && !onlyMoving) {
     if (!req.employeeId) {
-      return res.status(403).json({ error: "Sign in with your own name to change your work." });
+      return res.status(403).json({ error: "Sign in with your own name to edit the details of your work." });
     }
     const existing = await prisma.task.findUnique({ where: { id }, select: { assigneeId: true } });
     if (!existing) return res.status(404).json({ error: `Task ${id} not found` });
     if (existing.assigneeId !== req.employeeId) {
-      return res.status(403).json({ error: "You can only change work assigned to you." });
+      return res.status(403).json({ error: "You can only edit the details of work assigned to you." });
     }
     if ("assigneeId" in data && data.assigneeId !== req.employeeId) {
       return res.status(403).json({ error: "Only an admin can reassign work." });

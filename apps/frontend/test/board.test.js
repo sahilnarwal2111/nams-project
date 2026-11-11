@@ -1,6 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { filterTasks, sortTasks, isOverdue, SORT_MODES, workCounts } from "../src/board.js";
+import {
+  filterTasks, sortTasks, isOverdue, SORT_MODES, workCounts,
+  daysBefore, isRecentlyCompleted, boardTasks, completedTasks, completedByMonth,
+} from "../src/board.js";
 
 const tasks = [
   { id: "NK-101", title: "Topographic survey, Narwana layout", client: "Jind Infra Developers", priority: "high", status: "done", district: "Jind" },
@@ -82,4 +85,63 @@ test("workCounts totals open and completed work per person", () => {
   ]);
   assert.deepEqual(counts, { e6: { open: 2, done: 1 }, e4: { open: 0, done: 1 } });
   assert.deepEqual(workCounts([]), {});
+});
+
+test("daysBefore steps back across months and years", () => {
+  assert.equal(daysBefore("2026-11-11", 0), "2026-11-11");
+  assert.equal(daysBefore("2026-11-11", 7), "2026-11-04");
+  assert.equal(daysBefore("2026-11-03", 7), "2026-10-27");
+  assert.equal(daysBefore("2026-01-02", 3), "2025-12-30");
+  assert.equal(daysBefore("2024-03-01", 1), "2024-02-29");
+});
+
+const done = (id, completedAt) => ({ id, status: "done", completedAt });
+
+test("finished work stays on the board for seven days, then only in the completed list", () => {
+  const today = "2026-11-11";
+  assert.equal(isRecentlyCompleted(done("a", "2026-11-11"), today), true);
+  assert.equal(isRecentlyCompleted(done("a", "2026-11-05"), today), true, "six days ago is the seventh day");
+  assert.equal(isRecentlyCompleted(done("a", "2026-11-04"), today), false);
+  assert.equal(isRecentlyCompleted(done("a", null), today), false, "no recorded date counts as old");
+  assert.equal(isRecentlyCompleted({ id: "a", status: "todo", completedAt: "2026-11-11" }, today), false);
+
+  const all = [
+    { id: "NK-1", status: "todo" },
+    { id: "NK-2", status: "inprogress" },
+    done("NK-3", "2026-11-10"),
+    done("NK-4", "2026-10-01"),
+    done("NK-5", null),
+  ];
+  assert.deepEqual(boardTasks(all, today).map((t) => t.id), ["NK-1", "NK-2", "NK-3"]);
+  assert.equal(all.length, 5, "the input is not changed");
+});
+
+test("completedTasks lists all finished work, newest first, undated last", () => {
+  const all = [
+    done("NK-5", null),
+    done("NK-3", "2026-11-10"),
+    { id: "NK-1", status: "todo" },
+    done("NK-9", "2026-11-10"),
+    done("NK-4", "2026-10-01"),
+    done("NK-12", null),
+    done("NK-7", "2026-11-11"),
+  ];
+  assert.deepEqual(completedTasks(all).map((t) => t.id), ["NK-7", "NK-9", "NK-3", "NK-4", "NK-12", "NK-5"]);
+  assert.equal(all[0].id, "NK-5", "the input order is not changed");
+});
+
+test("completedByMonth groups the list by month with undated work in its own last group", () => {
+  const groups = completedByMonth([
+    done("NK-3", "2026-11-10"),
+    done("NK-7", "2026-11-11"),
+    done("NK-4", "2026-10-01"),
+    done("NK-5", null),
+    { id: "NK-1", status: "inprogress" },
+  ]);
+  assert.deepEqual(groups.map((g) => [g.key, g.tasks.map((t) => t.id)]), [
+    ["2026-11", ["NK-7", "NK-3"]],
+    ["2026-10", ["NK-4"]],
+    [null, ["NK-5"]],
+  ]);
+  assert.deepEqual(completedByMonth([]), []);
 });
