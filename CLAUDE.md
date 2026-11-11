@@ -77,7 +77,7 @@ Design decisions to preserve:
 - Unknown IDs return 404 (Prisma `P2025`); anything else falls through to the 500 handler in `app.js`.
 - CORS: `CORS_ORIGINS` is a comma-separated allowlist with `*` wildcards; unset allows everything (fine locally, not in production).
 
-Tests run against a real database: `npm test` in the backend runs `prisma migrate deploy`, seeds, then `node --test`. Tests that write must restore what they changed.
+Tests run against a real database: `npm test` in the backend runs `prisma generate` and `prisma migrate deploy`, seeds, then `node --test`. Tests that write must restore what they changed.
 
 ## Rules for changes
 
