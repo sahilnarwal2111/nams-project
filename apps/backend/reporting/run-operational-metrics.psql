@@ -1,0 +1,8 @@
+-- Invoke with psql -X --set=ON_ERROR_STOP=1 --file=<this file>.
+\set ON_ERROR_STOP on
+BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;
+SET LOCAL statement_timeout = '5s';
+SET LOCAL lock_timeout = '1s';
+SET LOCAL search_path = pg_catalog, public, pg_temp;
+\ir operational-metrics.sql
+COMMIT;
