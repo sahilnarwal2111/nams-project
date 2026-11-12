@@ -1,5 +1,29 @@
 import { prisma } from "../lib/prisma.js";
 import { hashPassword, MIN_PERSONAL_PASSWORD } from "../lib/auth.js";
+import { inTransaction, lockAndFind, logActivity } from "../lib/activity.js";
+import { HttpError, sendHttpError } from "../lib/httpError.js";
+
+// Changes a person's stored password hash and logs that it happened. The log
+// says who and when, never the password or its hash. Returns nothing.
+async function changePassword(req, passwordHash) {
+  const { id } = req.params;
+  await inTransaction(async (tx) => {
+    const before = await lockAndFind(tx, "employee", id);
+    if (!before) throw new HttpError(404, `Employee ${id} not found`);
+    await tx.employee.update({ where: { id }, data: { passwordHash } });
+    const had = before.passwordHash !== null;
+    if (passwordHash === null && !had) return;
+    await logActivity(tx, req, {
+      action: passwordHash === null ? "employee.password_removed" : "employee.password_set",
+      entityType: "employee",
+      entityId: id,
+      summary:
+        passwordHash === null
+          ? `Removed ${before.name}'s sign-in password`
+          : `${had ? "Changed" : "Set"} ${before.name}'s sign-in password`,
+    });
+  });
+}
 
 // The password hash never leaves the server; an admin sees whether one is set.
 function forRole({ passwordHash, ...employee }, role) {
@@ -17,23 +41,20 @@ export async function setEmployeePassword(req, res) {
   if (typeof password !== "string" || password.length < MIN_PERSONAL_PASSWORD || password.length > 200) {
     return res.status(400).json({ error: `Password must be ${MIN_PERSONAL_PASSWORD} to 200 characters.` });
   }
-  const passwordHash = await hashPassword(password);
   try {
-    await prisma.employee.update({ where: { id: req.params.id }, data: { passwordHash } });
+    await changePassword(req, await hashPassword(password));
     res.status(204).end();
   } catch (err) {
-    if (err.code === "P2025") return res.status(404).json({ error: `Employee ${req.params.id} not found` });
-    throw err;
+    sendHttpError(res, err);
   }
 }
 
 // Admin only. Removes a person's own password, which signs them out.
 export async function clearEmployeePassword(req, res) {
   try {
-    await prisma.employee.update({ where: { id: req.params.id }, data: { passwordHash: null } });
+    await changePassword(req, null);
     res.status(204).end();
   } catch (err) {
-    if (err.code === "P2025") return res.status(404).json({ error: `Employee ${req.params.id} not found` });
-    throw err;
+    sendHttpError(res, err);
   }
 }

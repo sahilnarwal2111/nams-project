@@ -1,20 +1,28 @@
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, useRef, useLayoutEffect } from "react";
 import {
-  hasApi, fetchEmployees, fetchTasks, updateTaskStatus, fetchClients, logClientCall, localDay,
+  hasApi, fetchEmployees, fetchTasks, updateTaskStatus, localDay,
   createTask, updateTask, deleteTask, taskFromForm, nextLocalTaskId,
-  createClient, updateClient, deleteClient, recordPayment, fetchPayments,
-  clientToApi, clientFormError, paymentError, paymentPatchBody, parseRupees, nextLocalClientId,
+  setTaskFee, recordPayment, fetchPayments, removePayment, logReminder, parseRupees,
   fetchSession, login, logout, onAuthLost,
-  daysAgo, paymentPending, enquiryError,
+  daysAgo, enquiryError,
+  fetchActivity,
   fetchTeam, canEditTask, viewerLabel, signInChoices, defaultSignInChoice, personalPasswordError, setEmployeePassword, clearEmployeePassword, sendEnquiry, fetchEnquiries, updateEnquiryStatus, deleteEnquiry,
 } from "./api.js";
-import { filterTasks, sortTasks, isOverdue, SORT_MODES, workCounts } from "./board.js";
+import {
+  filterTasks, sortTasks, isOverdue, SORT_MODES, workCounts,
+  boardTasks, completedTasks, completedByMonth, RECENT_DAYS,
+} from "./board.js";
 import { pageFromHash, hashForPage, anchorFromHash } from "./route.js";
 import {
+  PAYMENT_LABELS, RECEIVABLE_FILTERS, balanceOf, filterReceivables, receivableCounts, receivableTotals, sortReceivables,
+  parseFee, paymentError, withStatus, applyPayment, removeLocalPayment, formatRupeesTyped, caretAfterFormat,
+} from "./receivables.js";
+import { KIND_FILTERS, kindLabel, actorFilters, groupByDay, changeRows, deviceLabel, dayOf, dayLabel, timeLabel } from "./activity.js";
+import {
   Ruler, Route, Building2, Droplets, Plane, Waves,
-  Menu, X, ChevronRight, Clock, PhoneCall,
+  Menu, X, ChevronRight, PhoneCall,
   Mail, Phone, MapPin, ArrowLeft,
-  ArrowRight, Filter, ChevronDown, Plus, Pencil, Trash2, CalendarDays, IndianRupee, Lock, LogOut, History, Search, CircleCheck, Send, MessageSquare, KeyRound, UserRound, Eye, Info
+  ArrowRight, Filter, ChevronDown, Plus, Pencil, Trash2, CalendarDays, IndianRupee, Lock, LogOut, History, Search, CircleCheck, Send, MessageSquare, KeyRound, UserRound, Eye, Info, ScrollText, RefreshCw
 } from "lucide-react";
 
 /* ---------------------------------------------------------------
@@ -59,7 +67,7 @@ const EMPLOYEES = [
   { id: "e7", name: "Komal", role: "Accounts", initials: "KO" },
 ];
 
-const INITIAL_TASKS = [
+const SAMPLE_TASKS = [
   { id: "NK-101", title: "Topographic survey — Narwana layout", client: "Jind Infra Developers Pvt Ltd", assignee: "e6", status: "done", priority: "high" },
   { id: "NK-102", title: "Boundary survey — Safidon plot 44", client: "Rohtak Builders", assignee: "e6", status: "todo", priority: "low" },
   { id: "NK-103", title: "Drone survey — solar plant site, Hisar", client: "Kaithal Roadways", assignee: "e6", status: "inprogress", priority: "high" },
@@ -84,14 +92,17 @@ const INITIAL_TASKS = [
   { id: "NK-126", title: "Village XYZ pond X-section", client: "Village XYZ Panchayat", assignee: "e4", status: "todo", priority: "low" },
 ];
 
-const INITIAL_CLIENTS = [
-  { id: "c1", name: "Jind Infra Developers Pvt Ltd", contact: "Suresh Malik", phone: "+91 98961 23450", due: 184000, invoiceDate: "2026-05-12", lastCall: "2026-07-18", status: "overdue", notes: "Promised payment after milestone billing on the 25th." },
-  { id: "c2", name: "Jind Municipal Council", contact: "Eng. R. Dahiya", phone: "+91 98123 45678", due: 96000, invoiceDate: "2026-06-20", lastCall: "2026-07-20", status: "due-soon", notes: "Bill in final approval stage at municipal office." },
-  { id: "c3", name: "Rohtak Builders", contact: "Vinod Chhikara", phone: "+91 98221 55678", due: 52000, invoiceDate: "2026-06-02", lastCall: "2026-07-10", status: "overdue", notes: "Escalate to email if no response by Friday." },
-  { id: "c4", name: "Yamuna Bridgeworks", contact: "Neha Sharma", phone: "+91 90211 44890", due: 0, invoiceDate: "2026-05-28", lastCall: "2026-07-05", status: "paid", notes: "Cleared in full. Official receipt dispatched." },
-  { id: "c5", name: "Kaithal Roadways", contact: "Ramesh Sihag", phone: "+91 98811 22990", due: 133000, invoiceDate: "2026-06-15", lastCall: "2026-07-21", status: "due-soon", notes: "Confirmed cheque dispatch, awaiting bank clearance." },
-  { id: "c6", name: "Panipat Industries Assoc.", contact: "Devendra Ahlawat", phone: "+91 97641 33221", due: 76500, invoiceDate: "2026-04-30", lastCall: "2026-07-19", status: "overdue", notes: "Third reminder call made; requested formal statement." },
-];
+// Mock mode only: [amount to charge, received so far] for some of the sample
+// work. The rest has no amount yet; 0 is work that is not charged.
+const SAMPLE_BILLING = {
+  "NK-101": [40000, 40000], "NK-102": [18000, 0], "NK-103": [60000, 20000], "NK-104": [85000, 0], "NK-106": [30000, 30000],
+  "NK-110": [0, 0], "NK-112": [45000, 20000], "NK-113": [25000, 0], "NK-119": [35000, 0],
+};
+const INITIAL_TASKS = SAMPLE_TASKS.map((task) => {
+  const [fee, received] = SAMPLE_BILLING[task.id] ?? [null, 0];
+  const payments = received > 0 ? [{ id: 1, amount: received, note: null, receivedAt: "2026-11-02" }] : [];
+  return withStatus({ ...task, fee, received, payments, lastReminder: null });
+});
 
 const STATUS_META = {
   todo: { label: "To Do", color: C.steel, bg: "#EFECE6" },
@@ -114,10 +125,12 @@ const WORK_TYPES = [
   { id: "printout", label: "Printout" },
 ];
 
-const PAY_STATUS_META = {
-  paid: { label: "Paid", color: C.green, bg: "#EEF3ED" },
-  "due-soon": { label: "Due Soon", color: C.blue, bg: "#EBF3FA" },
-  overdue: { label: "Overdue", color: C.orangeDeep, bg: "#FDF0EA" },
+// Colours for the API's paymentStatus values; the labels are PAYMENT_LABELS.
+const PAYMENT_META = {
+  unset: { color: C.steel, bg: "#F0F2F4" },
+  unpaid: { color: C.orangeDeep, bg: "#FDF0EA" },
+  part: { color: C.blue, bg: "#EBF3FA" },
+  paid: { color: C.green, bg: "#EEF3ED" },
 };
 
 const ENQUIRY_STATUS_META = {
@@ -138,7 +151,7 @@ const fmtDate = (s) => new Date(s + "T00:00:00").toLocaleDateString("en-IN", { d
 /* ---------------------------------------------------------------
    NAVIGATION BAR
 ------------------------------------------------------------------*/
-function TopNav({ page, setPage, onSignOut, userName, showTeam }) {
+function TopNav({ page, setPage, onSignOut, userName, showTeam, showActivity }) {
   const [open, setOpen] = useState(false);
   const items = [
     { id: "home", label: "Overview" },
@@ -146,6 +159,7 @@ function TopNav({ page, setPage, onSignOut, userName, showTeam }) {
     { id: "payments", label: "Receivables" },
     { id: "enquiries", label: "Enquiries" },
     ...(showTeam ? [{ id: "team", label: "Team" }] : []),
+    ...(showActivity ? [{ id: "activity", label: "Activity" }] : []),
   ];
 
   return (
@@ -158,10 +172,10 @@ function TopNav({ page, setPage, onSignOut, userName, showTeam }) {
           <div style={{ color: C.paper }} className="f-display text-base font-bold tracking-tight leading-none">NK Consultancy</div>
         </button>
 
-        {/* Desktop Menu */}
-        <nav className="hidden md:flex items-center gap-1">
+        {/* Desktop menu: from 1024px, where every item, Sign out and the name fit on one line. */}
+        <nav className="hidden lg:flex items-center gap-1">
           {items.map((it) => {
-            const active = page === it.id;
+            const active = page === it.id || (it.id === "work" && page === "completed");
             return (
               <button
                 key={it.id}
@@ -195,7 +209,7 @@ function TopNav({ page, setPage, onSignOut, userName, showTeam }) {
 
         {/* Mobile Toggle */}
         <button
-          className="md:hidden p-2 rounded text-white"
+          className="lg:hidden p-2 rounded text-white"
           onClick={() => setOpen(!open)}
         >
           {open ? <X size={22} /> : <Menu size={22} />}
@@ -204,9 +218,9 @@ function TopNav({ page, setPage, onSignOut, userName, showTeam }) {
 
       {/* Mobile Drawer */}
       {open && (
-        <div style={{ background: C.navyDeep, borderBottom: `1px solid ${C.lineDark}` }} className="md:hidden px-4 pt-2 pb-4 space-y-1">
+        <div style={{ background: C.navyDeep, borderBottom: `1px solid ${C.lineDark}` }} className="lg:hidden px-4 pt-2 pb-4 space-y-1">
           {items.map((it) => {
-            const active = page === it.id;
+            const active = page === it.id || (it.id === "work" && page === "completed");
             return (
               <button
                 key={it.id}
@@ -485,7 +499,7 @@ function AccessNote({ testId, icon: Icon = Info, title, children, actionLabel, o
 /* ---------------------------------------------------------------
    WORK BOARD
 ------------------------------------------------------------------*/
-// canEdit decides whether the edit and move buttons are shown.
+// Anyone signed in can move a card. canEdit decides whether the edit button is shown.
 function TaskCard({ task, employees, onMove, onEdit, busy, today, canEdit }) {
   const emp = employees.find((e) => e.id === task.assignee);
   const pr = PRIORITY_META[task.priority];
@@ -551,7 +565,7 @@ function TaskCard({ task, employees, onMove, onEdit, busy, today, canEdit }) {
         </div>
 
         <div className="flex items-center gap-1">
-          {canEdit && idx > 0 && (
+          {idx > 0 && (
             <button
               onClick={() => onMove(task.id, order[idx - 1])}
               disabled={busy}
@@ -561,7 +575,7 @@ function TaskCard({ task, employees, onMove, onEdit, busy, today, canEdit }) {
               <ArrowLeft size={13} />
             </button>
           )}
-          {canEdit && idx < order.length - 1 && (
+          {idx < order.length - 1 && (
             <button
               onClick={() => onMove(task.id, order[idx + 1])}
               disabled={busy}
@@ -687,16 +701,39 @@ function Field({ label, required, children }) {
   );
 }
 
+// A rupee amount field that shows commas the Indian way as it is typed
+// (1,25,000). onChange gets the formatted text. The cursor is put back behind
+// the digit just typed, so editing the middle of an amount works.
+function RupeeInput({ value, onChange, ...rest }) {
+  const ref = useRef(null);
+  const caret = useRef(null);
+  useLayoutEffect(() => {
+    if (caret.current !== null && ref.current && document.activeElement === ref.current) {
+      ref.current.setSelectionRange(caret.current, caret.current);
+    }
+    caret.current = null;
+  });
+  const change = (e) => {
+    const formatted = formatRupeesTyped(e.target.value);
+    caret.current = caretAfterFormat(e.target.value, e.target.selectionStart ?? e.target.value.length, formatted);
+    onChange(formatted);
+  };
+  return <input ref={ref} inputMode="numeric" autoComplete="off" value={value} onChange={change} {...rest} />;
+}
+
 // Create (task = null) or edit a work item. onSave and onDelete return promises;
 // a rejection is shown in the form and the form stays open.
-// Only an admin may reassign or delete work.
-function WorkForm({ task, employees, onSave, onDelete, onClose, isAdmin = true }) {
+// Anyone can add work for anyone. Only an admin may reassign or delete existing
+// work. defaultAssignee preselects a person when they add work themselves.
+function WorkForm({ task, employees, onSave, onDelete, onClose, isAdmin = true, defaultAssignee = null }) {
   const [form, setForm] = useState(() => ({
     ...EMPTY_WORK,
-    assignee: employees[0]?.id ?? "",
+    assignee: (employees.some((e) => e.id === defaultAssignee) ? defaultAssignee : employees[0]?.id) ?? "",
     ...(task
       ? Object.fromEntries(Object.keys(EMPTY_WORK).map((k) => [k, task[k] ?? EMPTY_WORK[k]]))
       : {}),
+    // Only the admin's form has the amount to charge; blank means not decided.
+    ...(isAdmin ? { fee: formatRupeesTyped(task?.fee) } : {}),
   }));
   const { busy, error, setError, run } = useDialogAction(onClose);
 
@@ -709,6 +746,10 @@ function WorkForm({ task, employees, onSave, onDelete, onClose, isAdmin = true }
     if (form.title.trim() === "" || form.client.trim() === "") {
       setError("Work name and customer name are required.");
       return;
+    }
+    if (isAdmin) {
+      const fee = parseFee(form.fee, task?.received ?? 0);
+      if (fee.error) { setError(fee.error); return; }
     }
     run(() => onSave(form));
   };
@@ -784,9 +825,17 @@ function WorkForm({ task, employees, onSave, onDelete, onClose, isAdmin = true }
               {["high", "medium", "low"].map((p) => <option key={p} value={p}>{PRIORITY_META[p].label}</option>)}
             </select>
           </Field>
+          {isAdmin && (
+            <div className="sm:col-span-2">
+              <Field label="Amount to charge (₹)">
+                <RupeeInput name="fee" value={form.fee} onChange={(fee) => setForm((f) => ({ ...f, fee }))} style={line} className={INPUT_CLASS} placeholder="Leave blank if not decided yet" />
+              </Field>
+              <p style={{ color: C.steel }} className="f-body text-xs mt-1">Shown to the admin only. Payments are recorded against it in Receivables.</p>
+            </div>
+          )}
           <div className="sm:col-span-2">
             <Field label="Assign to" required>
-              <select name="assignee" value={form.assignee} onChange={set("assignee")} required disabled={!isAdmin} title={isAdmin ? undefined : "Only an admin can reassign work"} style={line} className={`${INPUT_CLASS} disabled:bg-stone-100 disabled:text-stone-500`}>
+              <select name="assignee" value={form.assignee} onChange={set("assignee")} required disabled={!isAdmin && Boolean(task)} title={!isAdmin && task ? "Only an admin can reassign work" : undefined} style={line} className={`${INPUT_CLASS} disabled:bg-stone-100 disabled:text-stone-500`}>
                 {employees.map((e) => <option key={e.id} value={e.id}>{e.name} ({e.role})</option>)}
               </select>
             </Field>
@@ -801,11 +850,78 @@ function WorkForm({ task, employees, onSave, onDelete, onClose, isAdmin = true }
 // viewer: { isAdmin, employeeId }. An admin creates, edits, moves and deletes
 // any work; a person signed in by name edits and moves only their own; the
 // office sign-in only looks. The API enforces the same rules.
-// access (API mode with sign-in on): { adminConfigured, onSwitchSignIn,
-// onOpenTeam }, used to explain missing buttons and point at the fix.
-function WorkBoard({ viewer = { isAdmin: true, employeeId: null }, access = null }) {
+const fmtMonth = (key) => new Date(`${key}-01T00:00:00`).toLocaleDateString("en-IN", { month: "long", year: "numeric" });
+
+// Every finished piece of work, newest first, in month groups. Anyone can
+// reopen one, which moves it back to In Progress on the board.
+function CompletedList({ tasks, total, employees, saving, viewer, onReopen, onEdit }) {
+  const groups = completedByMonth(tasks);
+  if (tasks.length === 0) {
+    return (
+      <div style={{ borderColor: C.line, color: C.steel, background: C.card }} className="border border-dashed rounded-md p-10 text-center f-body text-sm">
+        {total === 0 ? "No work has been completed yet. Work moved to Completed on the board is listed here." : "No completed work matches this search or person."}
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-6">
+      {groups.map((group) => (
+        <section key={group.key ?? "undated"} data-testid="completed-group">
+          <h3 style={{ color: C.steel }} className="f-mono text-xs font-semibold uppercase tracking-wider mb-2 px-1">
+            {group.key ? fmtMonth(group.key) : "Earlier, date not recorded"} · {group.tasks.length}
+          </h3>
+          <div style={{ background: C.card, borderColor: C.line }} className="border rounded-md shadow-sm divide-y divide-stone-200/70">
+            {group.tasks.map((task) => {
+              const emp = employees.find((e) => e.id === task.assignee);
+              return (
+                <div key={task.id} data-testid="completed-row" className="px-4 py-3 flex flex-col md:flex-row md:items-center gap-2 md:gap-4">
+                  <span style={{ color: C.steel }} className="f-mono text-[11px] font-medium md:w-16 shrink-0">{task.id}</span>
+                  <div className="min-w-0 flex-1">
+                    <div style={{ color: C.ink }} className="f-body text-sm font-semibold leading-snug">{task.title}</div>
+                    <div style={{ color: C.steel }} className="f-body text-xs">{task.client}{task.district ? ` · ${task.district}` : ""}</div>
+                  </div>
+                  <div className="flex items-center gap-2 md:w-36 shrink-0">
+                    <div style={{ background: C.navy, color: C.paper }} className="w-6 h-6 rounded-full flex items-center justify-center f-mono text-[10px] font-bold shrink-0">{emp?.initials}</div>
+                    <span style={{ color: C.steel }} className="f-body text-xs font-medium">{emp?.name}</span>
+                  </div>
+                  <div style={{ color: task.completedAt ? C.green : C.steel }} className="f-body text-xs flex items-center gap-1.5 md:w-32 shrink-0">
+                    <CircleCheck size={12} /> {task.completedAt ? fmtDate(task.completedAt) : "Date not recorded"}
+                  </div>
+                  <div className="flex items-center gap-1 shrink-0">
+                    <button
+                      onClick={() => onReopen(task.id)}
+                      disabled={saving.has(task.id)}
+                      aria-label={`Reopen ${task.id}`}
+                      style={{ borderColor: C.line, color: C.ink }}
+                      className="f-body text-xs font-semibold px-3 py-1.5 rounded border bg-white hover:bg-stone-50 disabled:opacity-40 inline-flex items-center gap-1"
+                    >
+                      <ArrowLeft size={12} /> Reopen
+                    </button>
+                    {canEditTask(task, viewer) && (
+                      <button onClick={() => onEdit(task)} aria-label={`Edit ${task.id}`} style={{ color: C.steel }} className="p-1.5 rounded hover:bg-stone-100">
+                        <Pencil size={13} />
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      ))}
+    </div>
+  );
+}
+
+// view is "board" or "completed" (the list of all finished work); onView
+// switches between them. access (API mode with sign-in on): { adminConfigured,
+// onSwitchSignIn, onOpenTeam }, used to explain what a sign-in can do.
+function WorkBoard({ viewer = { isAdmin: true, employeeId: null }, access = null, view = "board", onView = () => {}, local, setLocal }) {
   const useApi = hasApi();
-  const [tasks, setTasks] = useState(useApi ? [] : INITIAL_TASKS);
+  // Mock mode keeps the tasks in App, so Receivables shows the same tickets.
+  const [remote, setRemote] = useState([]);
+  const tasks = useApi ? remote : local;
+  const setTasks = useApi ? setRemote : setLocal;
   const [employees, setEmployees] = useState(useApi ? [] : EMPLOYEES);
   const [load, setLoad] = useState(useApi ? { state: "loading" } : { state: "ready" });
   const [attempt, setAttempt] = useState(0);
@@ -824,12 +940,13 @@ function WorkBoard({ viewer = { isAdmin: true, employeeId: null }, access = null
     if (editing === "new") {
       const created = useApi
         ? await createTask(form)
-        : { ...taskFromForm(form), id: nextLocalTaskId(tasks), status: "todo", createdAt: new Date().toISOString(), completedAt: null };
+        : withStatus({ fee: null, ...taskFromForm(form), id: nextLocalTaskId(tasks), status: "todo", createdAt: new Date().toISOString(), completedAt: null, received: 0, payments: [], lastReminder: null });
       setTasks((prev) => [...prev, created]);
     } else {
       const id = editing.id;
       const updated = useApi ? await updateTask(id, form) : taskFromForm(form);
-      setTasks((prev) => prev.map((t) => (t.id === id ? { ...t, ...updated } : t)));
+      // In mock mode the payment status follows a changed amount, as on the server.
+      setTasks((prev) => prev.map((t) => (t.id === id ? (useApi ? { ...t, ...updated } : withStatus({ ...t, ...updated })) : t)));
     }
   };
 
@@ -845,7 +962,7 @@ function WorkBoard({ viewer = { isAdmin: true, employeeId: null }, access = null
       .then(([emps, tks]) => {
         if (cancelled) return;
         setEmployees(emps);
-        setTasks(tks);
+        setRemote(tks);
         setLoad({ state: "ready" });
       })
       .catch((err) => {
@@ -871,7 +988,7 @@ function WorkBoard({ viewer = { isAdmin: true, employeeId: null }, access = null
   // saved could otherwise roll back to a status the server never had.
   const moveTask = (id, status) => {
     const task = tasks.find((t) => t.id === id);
-    if (!task || task.status === status || saving.has(id) || !canEditTask(task, viewer)) return;
+    if (!task || task.status === status || saving.has(id)) return;
     const prevStatus = task.status;
     setSaveError(null);
     setStatus(id, status);
@@ -885,10 +1002,14 @@ function WorkBoard({ viewer = { isAdmin: true, employeeId: null }, access = null
       .finally(() => setSaving((prev) => { const next = new Set(prev); next.delete(id); return next; }));
   };
 
-  const visible = useMemo(() => {
+  // The search and the person filter apply to both views.
+  const matching = useMemo(() => {
     const byStaff = filter === "all" ? tasks : tasks.filter((t) => t.assignee === filter);
-    return sortTasks(filterTasks(byStaff, query), sort);
-  }, [tasks, filter, query, sort]);
+    return filterTasks(byStaff, query);
+  }, [tasks, filter, query]);
+  // The board: open work plus work finished in the last week.
+  const visible = useMemo(() => sortTasks(boardTasks(matching, today), sort), [matching, today, sort]);
+  const completedMatching = useMemo(() => completedTasks(matching), [matching]);
   const overdueCount = tasks.filter((t) => isOverdue(t, today)).length;
   const columns = ["todo", "inprogress", "done"];
   const counts = { todo: 0, inprogress: 0, done: 0 };
@@ -903,12 +1024,17 @@ function WorkBoard({ viewer = { isAdmin: true, employeeId: null }, access = null
           <div>
             <div style={{ color: C.orangeDeep }} className="f-mono text-xs font-semibold tracking-wider uppercase mb-1">Task Operations</div>
             <h1 style={{ color: C.ink }} className="f-display text-2xl sm:text-3xl font-bold">Project Work Board</h1>
-            {!viewer.isAdmin && viewer.employeeId && (
+            {!viewer.isAdmin && (
               <p data-testid="board-access" style={{ color: C.steel }} className="f-body text-sm mt-1">
-                You can update and move the work assigned to you. An admin adds and assigns new work.
+                {viewer.employeeId
+                  ? "You can add work and move any card. You can edit the details of work assigned to you."
+                  : "You can add work and move any card. To edit the details of your work, sign in with your own name."}
+                {!viewer.employeeId && access?.onSwitchSignIn && (
+                  <button onClick={access.onSwitchSignIn} style={{ color: C.blue }} className="font-semibold underline ml-2">Switch sign-in</button>
+                )}
               </p>
             )}
-            {load.state === "ready" && viewer.isAdmin && (
+            {load.state === "ready" && (
               <button
                 onClick={() => setEditing("new")}
                 style={{ background: C.orange, color: C.paper }}
@@ -928,20 +1054,9 @@ function WorkBoard({ viewer = { isAdmin: true, employeeId: null }, access = null
           </div>
         </div>
 
-        {/* Why buttons are missing, and what to do about it */}
-        {!viewer.isAdmin && !viewer.employeeId && (
-          <AccessNote testId="board-access" icon={Eye} title="View only: you are signed in with the office password" actionLabel="Switch sign-in" onAction={access?.onSwitchSignIn}>
-            <div>The buttons to add, edit and move work are hidden for this sign-in. Sign in with the admin password to manage all work, or with your own name to update the work assigned to you.</div>
-            {access && !access.adminConfigured && (
-              <div data-testid="no-admin-note" style={{ color: C.orangeDeep }} className="font-semibold mt-1">
-                No admin password is set on the server yet. Add ADMIN_PASSWORD in the Render dashboard first.
-              </div>
-            )}
-          </AccessNote>
-        )}
         {viewer.isAdmin && access && load.state === "ready" && employees.length > 0 && employees.every((e) => e.hasPassword === false) && (
           <AccessNote testId="team-hint" icon={KeyRound} title="Nobody has their own sign-in yet" actionLabel="Open Team page" onAction={access.onOpenTeam}>
-            <div>Until you set a password for each person on the Team page, only you can move and edit work. Everyone else can only look.</div>
+            <div>Everyone can add and move work. Until you set a password for each person on the Team page, only you can edit the details of work.</div>
           </AccessNote>
         )}
 
@@ -972,6 +1087,25 @@ function WorkBoard({ viewer = { isAdmin: true, employeeId: null }, access = null
           </div>
         )}
 
+        {/* Board or the list of all completed work */}
+        <div role="tablist" aria-label="Work views" style={{ borderColor: C.line }} className="flex items-center gap-1 border-b mb-5">
+          {[
+            { id: "board", label: "Board" },
+            { id: "completed", label: `Completed (${counts.done})` },
+          ].map((tab) => (
+            <button
+              key={tab.id}
+              role="tab"
+              aria-selected={view === tab.id}
+              onClick={() => onView(tab.id)}
+              style={{ color: view === tab.id ? C.orangeDeep : C.steel, borderColor: view === tab.id ? C.orange : "transparent" }}
+              className="f-body text-sm font-semibold px-4 py-2 border-b-2 -mb-px hover:text-stone-900"
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+
         {/* Search & Sort */}
         <div className="flex flex-col sm:flex-row sm:items-center gap-3 mb-4">
           <label className="relative flex-1 max-w-md">
@@ -986,7 +1120,7 @@ function WorkBoard({ viewer = { isAdmin: true, employeeId: null }, access = null
               className="f-body text-sm w-full rounded border pl-9 pr-3 py-2 bg-white shadow-sm focus:outline-none focus:ring-2 focus:ring-orange-300"
             />
           </label>
-          <label className="flex items-center gap-2">
+          {view === "board" && <label className="flex items-center gap-2">
             <span className="f-mono text-xs text-stone-500 shrink-0">Sort:</span>
             <select
               aria-label="Sort work"
@@ -997,8 +1131,8 @@ function WorkBoard({ viewer = { isAdmin: true, employeeId: null }, access = null
             >
               {SORT_MODES.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
             </select>
-          </label>
-          {overdueCount > 0 && (
+          </label>}
+          {view === "board" && overdueCount > 0 && (
             <span data-testid="overdue-count" style={{ background: "#FDF0EA", color: C.orangeDeep, borderColor: C.orangeDeep }} className="f-body text-xs font-semibold px-3 py-1.5 rounded border sm:ml-auto self-start sm:self-auto">
               {overdueCount} overdue
             </span>
@@ -1037,8 +1171,20 @@ function WorkBoard({ viewer = { isAdmin: true, employeeId: null }, access = null
           ))}
         </div>
 
+        {view === "completed" && (
+          <>
+            <p data-testid="completed-summary" style={{ color: C.steel }} className="f-body text-sm mb-4">
+              {completedMatching.length === counts.done
+                ? `${counts.done} completed, newest first.`
+                : `Showing ${completedMatching.length} of ${counts.done} completed.`}
+              {" "}The board keeps work finished in the last {RECENT_DAYS} days. Everything completed is listed here.
+            </p>
+            <CompletedList tasks={completedMatching} total={counts.done} employees={employees} saving={saving} viewer={viewer} onReopen={(id) => moveTask(id, "inprogress")} onEdit={setEditing} />
+          </>
+        )}
+
         {/* Kanban Columns */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+        {view === "board" && <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
           {columns.map((col) => {
             const colTasks = visible.filter((t) => t.status === col);
             return (
@@ -1047,6 +1193,7 @@ function WorkBoard({ viewer = { isAdmin: true, employeeId: null }, access = null
                   <div className="flex items-center gap-2">
                     <span style={{ background: STATUS_META[col].color }} className="w-2.5 h-2.5 rounded-full" />
                     <h3 style={{ color: C.ink }} className="f-body text-sm font-bold">{STATUS_META[col].label}</h3>
+                    {col === "done" && <span style={{ color: C.steel }} className="f-mono text-[10px] uppercase tracking-wider">last {RECENT_DAYS} days</span>}
                   </div>
                   <span style={{ color: C.steel, background: C.card }} className="f-mono text-xs px-2 py-0.5 rounded border border-stone-200 font-semibold">
                     {colTasks.length}
@@ -1059,14 +1206,24 @@ function WorkBoard({ viewer = { isAdmin: true, employeeId: null }, access = null
                   ))}
                   {colTasks.length === 0 && (
                     <div style={{ borderColor: C.line, color: C.steel }} className="border border-dashed rounded-md p-8 text-center f-body text-xs">
-                      {query.trim() ? "No work matches your search here." : "No assignments found in this status."}
+                      {query.trim() ? "No work matches your search here." : col === "done" ? `Nothing completed in the last ${RECENT_DAYS} days.` : "No assignments found in this status."}
                     </div>
+                  )}
+                  {col === "done" && counts.done > 0 && (
+                    <button
+                      data-testid="all-completed-link"
+                      onClick={() => onView("completed")}
+                      style={{ color: C.blue, borderColor: C.line }}
+                      className="f-body text-xs font-semibold w-full mt-1 px-3 py-2 rounded border bg-white hover:bg-stone-50 inline-flex items-center justify-center gap-1.5"
+                    >
+                      <History size={13} /> All completed work ({counts.done})
+                    </button>
                   )}
                 </div>
               </div>
             );
           })}
-        </div>
+        </div>}
         </>)}
       </div>
 
@@ -1079,6 +1236,7 @@ function WorkBoard({ viewer = { isAdmin: true, employeeId: null }, access = null
           onDelete={removeWork}
           onClose={() => setEditing(null)}
           isAdmin={viewer.isAdmin}
+          defaultAssignee={viewer.employeeId}
         />
       )}
     </div>
@@ -1090,207 +1248,148 @@ function WorkBoard({ viewer = { isAdmin: true, employeeId: null }, access = null
 ------------------------------------------------------------------*/
 // isAdmin decides whether amounts and the money actions are shown. Staff see
 // only whether payment is received or pending.
-function ClientCard({ client, onCallLogged, onEdit, onPayment, onHistory, busy, isAdmin }) {
-  const meta = PAY_STATUS_META[client.status];
-  const pending = paymentPending(client);
+// One ticket in Receivables: its number, the work, how far the work is, and
+// how far the payment is. Amounts and the money buttons are the admin's.
+function ReceivableRow({ task, employees, isAdmin, busy, onAmount, onPayment, onPaid, onHistory, onReminder }) {
+  const pay = PAYMENT_META[task.paymentStatus];
+  const work = STATUS_META[task.status];
+  const assignee = employees.find((e) => e.id === task.assignee);
+  const due = balanceOf(task);
+  const owing = task.paymentStatus === "unpaid" || task.paymentStatus === "part";
+  const pill = "f-mono text-[10px] font-bold px-2 py-0.5 rounded uppercase tracking-wide whitespace-nowrap";
+  const outline = "f-body text-xs font-semibold px-3 py-1.5 rounded border bg-white flex items-center gap-1 shadow-sm hover:bg-stone-50 active:scale-95 transition-all";
+  const iconButton = "p-1.5 rounded hover:bg-stone-100 active:scale-95 transition-transform";
+
   return (
-    <div style={{ background: C.card, borderColor: C.line }} className="border rounded-md p-5 shadow-sm flex flex-col justify-between">
-      <div>
-        <div className="flex items-start justify-between mb-3 gap-2">
-          <div>
-            <h3 style={{ color: C.ink }} className="f-display text-base font-bold">{client.name}</h3>
-            <div style={{ color: C.steel }} className="f-body text-xs mt-0.5">{client.contact} &nbsp;•&nbsp; {client.phone}</div>
-          </div>
-          <div className="flex items-center gap-1 shrink-0">
-            <span style={{ background: meta.bg, color: meta.color }} className="f-mono text-[10px] font-bold px-2.5 py-1 rounded uppercase tracking-wide">
-              {meta.label}
-            </span>
-            {isAdmin && (<>
-            <button
-              onClick={() => onHistory(client)}
-              aria-label={`Payment history for ${client.name}`}
-              title="Payment history"
-              style={{ color: C.steel }}
-              className="p-1 rounded hover:bg-stone-100 active:scale-95 transition-transform"
-            >
-              <History size={13} />
-            </button>
-            <button
-              onClick={() => onEdit(client)}
-              aria-label={`Edit ${client.name}`}
-              style={{ color: C.steel }}
-              className="p-1 rounded hover:bg-stone-100 active:scale-95 transition-transform"
-            >
-              <Pencil size={13} />
-            </button>
-            </>)}
-          </div>
+    <li data-testid="receivable-row" data-task={task.id} style={{ borderColor: C.line }} className="border-t first:border-t-0 px-4 py-3.5 flex flex-col lg:flex-row lg:items-center gap-3">
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-2 flex-wrap mb-1">
+          <span style={{ color: C.steel }} className="f-mono text-xs font-semibold">{task.id}</span>
+          <span data-testid="pay-status" style={{ background: pay.bg, color: pay.color }} className={pill}>{PAYMENT_LABELS[task.paymentStatus]}</span>
+          <span data-testid="work-status" style={{ color: work.color, borderColor: C.line }} className={`${pill} border bg-white font-medium`}>Work: {work.label}</span>
         </div>
-
-        <div className="grid grid-cols-2 gap-3 mb-4">
-          <div style={{ background: C.paper }} className="rounded p-3 border border-stone-200/60">
-            <div style={{ color: C.steel }} className="f-mono text-[10px] uppercase tracking-wider mb-1">{isAdmin ? "Outstanding" : "Payment"}</div>
-            <div data-testid="client-amount" style={{ color: pending ? C.orangeDeep : C.green }} className="f-display text-lg font-bold">
-              {isAdmin ? (pending ? fmtINR(client.due) : "Settled") : (pending ? "Pending" : "Received")}
-            </div>
-          </div>
-          <div style={{ background: C.paper }} className="rounded p-3 border border-stone-200/60">
-            <div style={{ color: C.steel }} className="f-mono text-[10px] uppercase tracking-wider mb-1">Invoice Date</div>
-            <div style={{ color: C.ink }} className="f-body text-sm font-semibold">{fmtDate(client.invoiceDate)}</div>
-          </div>
+        <div style={{ color: C.ink }} className="f-display text-sm font-bold leading-snug">{task.title}</div>
+        <div style={{ color: C.steel }} className="f-body text-xs mt-0.5">
+          {task.client}{assignee ? ` · ${assignee.name}` : ""}
+          {owing && <> · <span data-testid="last-reminder">Reminder: {task.lastReminder ? daysAgo(task.lastReminder) : "none yet"}</span></>}
         </div>
       </div>
 
-      <div>
-        <div style={{ borderColor: C.line }} className="border-t pt-3 flex items-center justify-between flex-wrap gap-2">
-          <div style={{ color: C.steel }} className="f-body text-xs flex items-center gap-1.5">
-            <Clock size={13} style={{ color: C.blue }} /> Last contacted: <strong className="text-stone-700">{daysAgo(client.lastCall)}</strong>
-          </div>
-          {pending && (
-            <div className="flex items-center gap-2">
-              {isAdmin && <button
-                onClick={() => onPayment(client)}
-                style={{ borderColor: C.green, color: C.green }}
-                className="f-body text-xs font-semibold px-3 py-1.5 rounded border bg-white flex items-center gap-1 shadow-sm hover:bg-stone-50 active:scale-95 transition-all"
-              >
-                <IndianRupee size={12} /> Record Payment
-              </button>}
-              <button
-                onClick={() => onCallLogged(client.id)}
-                disabled={busy}
-                style={{ background: C.navy, color: C.paper }}
-                className="f-body text-xs font-semibold px-3 py-1.5 rounded flex items-center gap-1.5 shadow-sm hover:opacity-90 active:scale-95 transition-all disabled:opacity-50"
-              >
-                <PhoneCall size={13} /> Log Reminder
-              </button>
-            </div>
-          )}
+      {isAdmin && (
+        <div data-testid="pay-amount" className="lg:w-52 lg:text-right shrink-0">
+          {task.paymentStatus === "unset" ? (
+            <div style={{ color: C.steel }} className="f-body text-sm">No amount yet</div>
+          ) : task.fee === 0 ? (
+            <div style={{ color: C.steel }} className="f-body text-sm">No charge</div>
+          ) : (<>
+            <div style={{ color: C.ink }} className="f-body text-sm"><strong>{fmtINR(task.received ?? 0)}</strong> of {fmtINR(task.fee)} received</div>
+            <div style={{ color: due > 0 ? C.orangeDeep : C.green }} className="f-display text-sm font-bold">{due > 0 ? `${fmtINR(due)} due` : "Settled"}</div>
+          </>)}
         </div>
+      )}
 
-        {client.notes && (
-          <p style={{ color: C.steel, background: "#FAF8F5" }} className="f-body text-xs mt-3 p-2.5 rounded border border-stone-200/80 leading-relaxed italic">
-            "{client.notes}"
-          </p>
+      <div className="flex items-center gap-2 flex-wrap lg:justify-end shrink-0">
+        {isAdmin && task.paymentStatus === "unset" && (
+          <button onClick={() => onAmount(task)} style={{ borderColor: C.blue, color: C.blue }} className={outline}>
+            <IndianRupee size={12} /> Set amount
+          </button>
         )}
+        {isAdmin && owing && (<>
+          <button onClick={() => onPayment(task)} style={{ borderColor: C.line, color: C.ink }} className={outline}>
+            <IndianRupee size={12} /> Part payment
+          </button>
+          <button onClick={() => onPaid(task)} style={{ borderColor: C.green, color: C.green }} className={outline}>
+            <CircleCheck size={13} /> Mark as paid
+          </button>
+        </>)}
+        {owing && (
+          <button onClick={() => onReminder(task.id)} disabled={busy} style={{ background: C.navy, color: C.paper }} className="f-body text-xs font-semibold px-3 py-1.5 rounded flex items-center gap-1.5 shadow-sm hover:opacity-90 active:scale-95 transition-all disabled:opacity-50">
+            <PhoneCall size={13} /> Log reminder
+          </button>
+        )}
+        {isAdmin && task.paymentStatus !== "unset" && (<>
+          <button onClick={() => onHistory(task)} aria-label={`Payments on ${task.id}`} title="Payments received" style={{ color: C.steel }} className={iconButton}>
+            <History size={14} />
+          </button>
+          <button onClick={() => onAmount(task)} aria-label={`Change the amount for ${task.id}`} title="Change the amount to charge" style={{ color: C.steel }} className={iconButton}>
+            <Pencil size={14} />
+          </button>
+        </>)}
       </div>
-    </div>
+    </li>
   );
 }
 
-const EMPTY_CLIENT = { name: "", contact: "", phone: "", due: "", invoiceDate: "", status: "due-soon", notes: "" };
+// The line under a dialog's title saying which work it is about.
+function TicketLine({ task }) {
+  return (
+    <p style={{ color: C.steel }} className="f-body text-sm leading-snug">
+      <strong style={{ color: C.ink }}>{task.title}</strong><br />{task.client}
+    </p>
+  );
+}
 
-// Create (client = null) or edit a client. onSave and onDelete return promises.
-function ClientForm({ client, onSave, onDelete, onClose }) {
-  const [form, setForm] = useState(() => (
-    client
-      ? { ...EMPTY_CLIENT, ...Object.fromEntries(Object.keys(EMPTY_CLIENT).map((k) => [k, client[k] ?? ""])), due: String(client.due) }
-      : { ...EMPTY_CLIENT, invoiceDate: localDay() }
-  ));
+// Set or change the amount to charge for a ticket. onSave returns a promise.
+function AmountForm({ task, onSave, onClose }) {
+  const [value, setValue] = useState(formatRupeesTyped(task.fee));
   const { busy, error, setError, run } = useDialogAction(onClose);
-  const set = (key) => (e) => setForm((f) => ({ ...f, [key]: e.target.value }));
+  const received = task.received ?? 0;
 
   const submit = (e) => {
     e.preventDefault();
-    const problem = clientFormError(form);
-    if (problem) { setError(problem); return; }
-    run(() => onSave(form));
+    const parsed = parseFee(value, received);
+    if (parsed.error) { setError(parsed.error); return; }
+    run(() => onSave(task, parsed.fee));
   };
 
-  const line = { borderColor: C.line, color: C.ink };
-  const settled = parseRupees(form.due) === 0;
-
   return (
-    <Modal
-      label={client ? `Edit ${client.name}` : "New client"}
-      kicker={client ? "Receivable" : "New Receivable"}
-      title={client ? "Edit Client" : "Add Client"}
-      busy={busy}
-      onClose={onClose}
-      onSubmit={submit}
-      footer={<>
-        <div>
-          {client && <DeleteControl question="Delete this client permanently?" busy={busy} onConfirm={() => run(() => onDelete(client.id))} />}
-        </div>
-        <DialogButtons busy={busy} onClose={onClose} saveLabel={client ? "Save Changes" : "Add Client"} />
-      </>}
-    >
-      <div className="p-5 grid grid-cols-1 sm:grid-cols-2 gap-4">
-        <div className="sm:col-span-2">
-          <Field label="Client name" required>
-            <input name="name" value={form.name} onChange={set("name")} required autoFocus style={line} className={INPUT_CLASS} />
-          </Field>
-        </div>
-        <Field label="Contact person" required>
-          <input name="contact" value={form.contact} onChange={set("contact")} required style={line} className={INPUT_CLASS} />
+    <Modal label={`Amount to charge for ${task.id}`} kicker={task.id} title="Amount to charge" busy={busy} onClose={onClose} onSubmit={submit} width="max-w-md" footer={<DialogButtons busy={busy} onClose={onClose} saveLabel="Save Amount" />}>
+      <div className="p-5 grid grid-cols-1 gap-4">
+        <TicketLine task={task} />
+        <Field label="Amount to charge (₹)">
+          <RupeeInput name="fee" value={value} onChange={setValue} autoFocus style={{ borderColor: C.line, color: C.ink }} className={INPUT_CLASS} />
         </Field>
-        <Field label="Phone" required>
-          <input name="phone" type="tel" value={form.phone} onChange={set("phone")} required style={line} className={INPUT_CLASS} placeholder="+91" />
-        </Field>
-        <Field label="Outstanding amount (₹)" required>
-          <input name="due" inputMode="numeric" value={form.due} onChange={set("due")} required style={line} className={INPUT_CLASS} placeholder="0" />
-        </Field>
-        <Field label="Invoice date" required>
-          <input name="invoiceDate" type="date" value={form.invoiceDate} onChange={set("invoiceDate")} required style={line} className={INPUT_CLASS} />
-        </Field>
-        <div className="sm:col-span-2">
-          <Field label="Status" required>
-            <select name="status" value={settled ? "paid" : form.status} onChange={set("status")} disabled={settled} style={line} className={INPUT_CLASS}>
-              {["overdue", "due-soon", "paid"].map((st) => <option key={st} value={st}>{PAY_STATUS_META[st].label}</option>)}
-            </select>
-          </Field>
-          {settled && <p style={{ color: C.steel }} className="f-body text-xs mt-1">Nothing outstanding, so this client is marked as paid.</p>}
-        </div>
-        <div className="sm:col-span-2">
-          <Field label="Notes">
-            <textarea name="notes" value={form.notes} onChange={set("notes")} rows={3} style={line} className={INPUT_CLASS} />
-          </Field>
-        </div>
+        <p style={{ color: C.steel }} className="f-body text-xs -mt-2">
+          {received > 0
+            ? `${fmtINR(received)} has been received, so the amount cannot be less than that.`
+            : "Leave blank if it is not decided yet. Enter 0 for work that is not charged."}
+        </p>
         <DialogError error={error} />
       </div>
     </Modal>
   );
 }
 
-// Record an amount received from a client. onSave returns a promise.
-function PaymentForm({ client, onSave, onClose }) {
+// Record part of what is owed. onSave returns a promise.
+function PaymentForm({ task, onSave, onClose }) {
   const [amount, setAmount] = useState("");
   const [note, setNote] = useState("");
   const { busy, error, setError, run } = useDialogAction(onClose);
+  const due = balanceOf(task);
   const paid = parseRupees(amount);
-  const remaining = Number.isNaN(paid) || paid > client.due ? null : client.due - paid;
+  const remaining = Number.isNaN(paid) || paid > due ? null : due - paid;
 
   const submit = (e) => {
     e.preventDefault();
-    const problem = paymentError(client, amount);
+    const problem = paymentError(task, amount);
     if (problem) { setError(problem); return; }
-    run(() => onSave(client, amount, note));
+    run(() => onSave(task, amount, note));
   };
 
   return (
-    <Modal
-      label={`Record payment from ${client.name}`}
-      kicker="Payment Received"
-      title={client.name}
-      busy={busy}
-      onClose={onClose}
-      onSubmit={submit}
-      width="max-w-md"
-      footer={<DialogButtons busy={busy} onClose={onClose} saveLabel="Record Payment" />}
-    >
+    <Modal label={`Record a payment on ${task.id}`} kicker={task.id} title="Payment received" busy={busy} onClose={onClose} onSubmit={submit} width="max-w-md" footer={<DialogButtons busy={busy} onClose={onClose} saveLabel="Record Payment" />}>
       <div className="p-5 grid grid-cols-1 gap-4">
+        <TicketLine task={task} />
         <div style={{ background: C.card, borderColor: C.line }} className="border rounded p-3 flex items-center justify-between">
-          <span style={{ color: C.steel }} className="f-mono text-[10px] uppercase tracking-wider">Outstanding</span>
-          <span style={{ color: C.orangeDeep }} className="f-display text-lg font-bold">{fmtINR(client.due)}</span>
+          <span style={{ color: C.steel }} className="f-mono text-[10px] uppercase tracking-wider">Balance due</span>
+          <span style={{ color: C.orangeDeep }} className="f-display text-lg font-bold">{fmtINR(due)}</span>
         </div>
         <Field label="Amount received (₹)" required>
-          <input name="amount" inputMode="numeric" value={amount} onChange={(e) => setAmount(e.target.value)} required autoFocus style={{ borderColor: C.line, color: C.ink }} className={INPUT_CLASS} />
+          <RupeeInput name="amount" value={amount} onChange={setAmount} required autoFocus style={{ borderColor: C.line, color: C.ink }} className={INPUT_CLASS} />
         </Field>
-        <button type="button" onClick={() => setAmount(String(client.due))} style={{ color: C.blue }} className="f-body text-xs font-semibold text-left -mt-2">
-          Paid in full ({fmtINR(client.due)})
-        </button>
         {remaining !== null && paid > 0 && (
-          <p data-testid="remaining" style={{ color: remaining === 0 ? C.green : C.steel }} className="f-body text-sm">
-            {remaining === 0 ? "This clears the account. It will be marked as paid." : `${fmtINR(remaining)} will remain outstanding.`}
+          <p data-testid="remaining" style={{ color: remaining === 0 ? C.green : C.steel }} className="f-body text-sm -mt-2">
+            {remaining === 0 ? "This settles the ticket. It will show as Paid." : `${fmtINR(remaining)} will still be due. The ticket will show as Part paid.`}
           </p>
         )}
         <Field label="Note">
@@ -1302,10 +1401,43 @@ function PaymentForm({ client, onSave, onClose }) {
   );
 }
 
-// The payments received from one client, newest first. load returns a promise
-// of the list.
-function PaymentHistory({ client, load, onClose }) {
+// "Are you sure?" before a ticket is marked as paid in full. onConfirm
+// returns a promise.
+function ConfirmPaid({ task, onConfirm, onClose }) {
+  const { busy, error, run } = useDialogAction(onClose);
+  const due = balanceOf(task);
+  const received = task.received ?? 0;
+  return (
+    <Modal
+      label={`Mark ${task.id} as paid`}
+      kicker={task.id}
+      title="Mark as paid?"
+      busy={busy}
+      onClose={onClose}
+      onSubmit={(e) => { e.preventDefault(); run(() => onConfirm(task)); }}
+      width="max-w-md"
+      footer={<DialogButtons busy={busy} onClose={onClose} saveLabel="Yes, mark as paid" />}
+    >
+      <div data-testid="confirm-paid" className="p-5 grid grid-cols-1 gap-3">
+        <TicketLine task={task} />
+        <p style={{ color: C.ink }} className="f-body text-sm leading-relaxed">
+          This records <strong>{fmtINR(due)}</strong> received today{received > 0 ? `, on top of the ${fmtINR(received)} received earlier` : ""}. The ticket will show as <strong>Paid</strong>.
+        </p>
+        <p style={{ color: C.steel }} className="f-body text-xs">If this was a mistake, the payment can be removed from the ticket&rsquo;s payment list.</p>
+        <DialogError error={error} />
+      </div>
+    </Modal>
+  );
+}
+
+// The payments received on one ticket, newest first. load returns a promise
+// of the list; onRemove takes one back and returns a promise.
+function PaymentHistory({ task, load, onRemove, onClose }) {
   const [state, setState] = useState({ status: "loading" });
+  // The payment being asked about, and the one being removed.
+  const [asking, setAsking] = useState(null);
+  const [removing, setRemoving] = useState(null);
+  const [error, setError] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -1315,119 +1447,113 @@ function PaymentHistory({ client, load, onClose }) {
     return () => { cancelled = true; };
   }, [load]);
 
-  const total = state.status === "ready" ? state.payments.reduce((sum, p) => sum + p.amount, 0) : 0;
+  const remove = (payment) => {
+    setRemoving(payment.id);
+    setError(null);
+    onRemove(task, payment.id)
+      .then(() => setState((s) => ({ ...s, payments: s.payments.filter((p) => p.id !== payment.id) })))
+      .catch((err) => setError(`Could not remove the payment. ${err.message}`))
+      .finally(() => { setRemoving(null); setAsking(null); });
+  };
+
+  const due = balanceOf(task);
+  const small = "f-body text-xs px-2.5 py-1 rounded";
 
   return (
     <Modal
-      label={`Payment history for ${client.name}`}
-      kicker="Payment History"
-      title={client.name}
+      label={`Payments on ${task.id}`}
+      kicker={task.id}
+      title="Payments received"
+      busy={removing !== null}
       onClose={onClose}
       onSubmit={(e) => { e.preventDefault(); onClose(); }}
       width="max-w-md"
-      footer={
-        <button type="submit" style={{ borderColor: C.line, color: C.ink }} className="f-body text-sm px-4 py-2 rounded border bg-white ml-auto">
-          Close
-        </button>
-      }
+      footer={<button type="submit" disabled={removing !== null} style={{ borderColor: C.line, color: C.ink }} className="f-body text-sm px-4 py-2 rounded border bg-white ml-auto">Close</button>}
     >
-      <div className="p-5">
-        {state.status === "loading" && <p style={{ color: C.steel }} className="f-body text-sm text-center py-6">Loading payments…</p>}
+      <div className="p-5 grid grid-cols-1 gap-3">
+        <TicketLine task={task} />
+        <div style={{ background: C.card, borderColor: C.line }} className="border rounded p-3 grid grid-cols-3 gap-2 text-center">
+          {[
+            ["To charge", fmtINR(task.fee ?? 0), C.ink, "history-fee"],
+            ["Received", fmtINR(task.received ?? 0), C.green, "total-received"],
+            ["Due", due > 0 ? fmtINR(due) : "Nothing", due > 0 ? C.orangeDeep : C.green, "history-due"],
+          ].map(([label, value, color, testId]) => (
+            <div key={label}>
+              <div style={{ color: C.steel }} className="f-mono text-[10px] uppercase tracking-wider">{label}</div>
+              <div data-testid={testId} style={{ color }} className="f-display text-base font-bold">{value}</div>
+            </div>
+          ))}
+        </div>
+        {state.status === "loading" && <p style={{ color: C.steel }} className="f-body text-sm text-center py-4">Loading payments…</p>}
         {state.status === "error" && <DialogError error={`Could not load the payments. ${state.message}`} />}
         {state.status === "ready" && state.payments.length === 0 && (
-          <p style={{ color: C.steel }} className="f-body text-sm text-center py-6">No payments recorded yet.</p>
+          <p style={{ color: C.steel }} className="f-body text-sm text-center py-4">No payments recorded yet.</p>
         )}
         {state.status === "ready" && state.payments.length > 0 && (
-          <>
-            <div style={{ background: C.card, borderColor: C.line }} className="border rounded p-3 flex items-center justify-between mb-3">
-              <span style={{ color: C.steel }} className="f-mono text-[10px] uppercase tracking-wider">Total received</span>
-              <span data-testid="total-received" style={{ color: C.green }} className="f-display text-lg font-bold">{fmtINR(total)}</span>
-            </div>
-            <ul style={{ borderColor: C.line }} className="border rounded divide-y divide-stone-200 bg-white">
-              {state.payments.map((p) => (
-                <li key={p.id} data-testid="payment-row" className="px-3 py-2.5 flex items-start justify-between gap-3">
+          <ul style={{ borderColor: C.line }} className="border rounded divide-y divide-stone-200 bg-white">
+            {state.payments.map((p) => (
+              <li key={p.id} data-testid="payment-row" className="px-3 py-2.5">
+                <div className="flex items-start justify-between gap-3">
                   <div>
                     <div style={{ color: C.ink }} className="f-body text-sm font-semibold">{fmtDate(p.receivedAt)}</div>
                     {p.note && <div style={{ color: C.steel }} className="f-body text-xs mt-0.5">{p.note}</div>}
                   </div>
-                  <div style={{ color: C.green }} className="f-display text-sm font-bold shrink-0">{fmtINR(p.amount)}</div>
-                </li>
-              ))}
-            </ul>
-          </>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <span style={{ color: C.green }} className="f-display text-sm font-bold">{fmtINR(p.amount)}</span>
+                    {asking !== p.id && (
+                      <button type="button" onClick={() => setAsking(p.id)} disabled={removing !== null} aria-label={`Remove the payment of ${fmtINR(p.amount)}`} title="Remove this payment" style={{ color: C.steel }} className="p-1 rounded hover:bg-stone-100">
+                        <Trash2 size={13} />
+                      </button>
+                    )}
+                  </div>
+                </div>
+                {asking === p.id && (
+                  <div className="flex items-center gap-2 flex-wrap mt-2">
+                    <span style={{ color: C.orangeDeep }} className="f-body text-xs font-semibold">Remove this payment? {fmtINR(p.amount)} will be due again.</span>
+                    <button type="button" onClick={() => remove(p)} disabled={removing !== null} style={{ background: C.orangeDeep, color: C.paper }} className={`${small} font-semibold`}>
+                      {removing === p.id ? "Removing…" : "Yes, remove"}
+                    </button>
+                    <button type="button" onClick={() => setAsking(null)} disabled={removing !== null} style={{ borderColor: C.line, color: C.ink }} className={`${small} border bg-white`}>No</button>
+                  </div>
+                )}
+              </li>
+            ))}
+          </ul>
         )}
-        <p style={{ color: C.steel }} className="f-body text-xs mt-3">
-          Still outstanding: <strong>{client.due > 0 ? fmtINR(client.due) : "nothing"}</strong>
-        </p>
+        <DialogError error={error} />
       </div>
     </Modal>
   );
 }
 
-function Payments({ isAdmin }) {
+// Receivables, ticket by ticket. Every ticket on the Work Board is listed
+// here, so the two never disagree. local and setLocal are the mock-mode tasks
+// shared with the Work Board.
+function Payments({ isAdmin, local, setLocal }) {
   const useApi = hasApi();
-  const [clients, setClients] = useState(useApi ? [] : INITIAL_CLIENTS);
+  const [remote, setRemote] = useState([]);
+  const [employees, setEmployees] = useState(useApi ? [] : EMPLOYEES);
   const [load, setLoad] = useState(useApi ? { state: "loading" } : { state: "ready" });
   const [attempt, setAttempt] = useState(0);
   const [saveError, setSaveError] = useState(null);
   const [saving, setSaving] = useState(() => new Set());
-  const [filter, setFilter] = useState("all");
+  const [filter, setFilter] = useState("pending");
+  const [query, setQuery] = useState("");
+  // { kind: "amount" | "payment" | "paid" | "history", id }, or null.
+  const [dialog, setDialog] = useState(null);
+  const tasks = useApi ? remote : local;
+  const setTasks = useApi ? setRemote : setLocal;
   // The viewer's own calendar day, so "Today" is right before 05:30 IST too.
   const today = localDay();
-  // null = closed, "new" = adding, a client = editing it.
-  const [editing, setEditing] = useState(null);
-  const [paying, setPaying] = useState(null);
-  const [history, setHistory] = useState(null);
-  // Mock mode only: payments recorded in this browser, newest first, by client id.
-  const [localPayments, setLocalPayments] = useState({});
-
-  const replaceClient = (id, changes) => setClients((prev) => prev.map((c) => (c.id === id ? { ...c, ...changes } : c)));
-
-  // These return promises so the dialogs can show a failure and stay open.
-  const saveClient = async (form) => {
-    if (editing === "new") {
-      const created = useApi
-        ? await createClient(form)
-        : { ...clientToApi(form), id: nextLocalClientId(clients), lastCall: today };
-      setClients((prev) => [...prev, created]);
-    } else {
-      const id = editing.id;
-      replaceClient(id, useApi ? await updateClient(id, form) : clientToApi(form));
-    }
-  };
-
-  const removeClient = async (id) => {
-    if (useApi) await deleteClient(id);
-    setClients((prev) => prev.filter((c) => c.id !== id));
-  };
-
-  const savePayment = async (client, amount, note) => {
-    if (useApi) {
-      replaceClient(client.id, (await recordPayment(client, amount, note)).client);
-      return;
-    }
-    replaceClient(client.id, paymentPatchBody(client, amount));
-    setLocalPayments((prev) => {
-      const earlier = prev[client.id] ?? [];
-      const payment = { id: earlier.length + 1, clientId: client.id, amount: parseRupees(amount), note: note.trim() || null, receivedAt: today };
-      return { ...prev, [client.id]: [payment, ...earlier] };
-    });
-  };
-
-  // Stable while the dialog is open, so it loads once.
-  const historyId = history?.id;
-  const loadHistory = useMemo(
-    () => () => (useApi ? fetchPayments(historyId) : Promise.resolve(localPayments[historyId] ?? [])),
-    [useApi, historyId, localPayments]
-  );
 
   useEffect(() => {
     if (!useApi) return undefined;
     let cancelled = false;
-    fetchClients()
-      .then((list) => {
+    Promise.all([fetchEmployees(), fetchTasks()])
+      .then(([people, list]) => {
         if (cancelled) return;
-        setClients(list);
+        setEmployees(people);
+        setRemote(list);
         setLoad({ state: "ready" });
       })
       .catch((err) => {
@@ -1441,51 +1567,68 @@ function Payments({ isAdmin }) {
     setAttempt((a) => a + 1);
   };
 
-  const setLastCall = (id, lastCall) => setClients((prev) => prev.map((c) => (c.id === id ? { ...c, lastCall } : c)));
+  const replaceTask = (task) => setTasks((prev) => prev.map((t) => (t.id === task.id ? { ...t, ...task } : t)));
 
-  // One save per client at a time, so a failed save always restores a date the
+  // These return promises so the dialogs can show a failure and stay open.
+  const saveFee = async (task, fee) => replaceTask(useApi ? await setTaskFee(task.id, fee) : withStatus({ ...task, fee }));
+  const savePayment = async (task, amount, note) => {
+    if (useApi) {
+      replaceTask((await recordPayment(task.id, amount, note)).task);
+      return;
+    }
+    const earlier = task.payments ?? [];
+    replaceTask(applyPayment(task, { id: Math.max(0, ...earlier.map((p) => p.id)) + 1, amount: parseRupees(amount), note: note.trim() || null, receivedAt: today }));
+  };
+  const markPaid = (task) => savePayment(task, String(balanceOf(task)), "");
+  const takeBack = async (task, paymentId) => replaceTask(useApi ? await removePayment(task.id, paymentId) : removeLocalPayment(task, paymentId));
+
+  const open = dialog ? tasks.find((t) => t.id === dialog.id) : null;
+  // Stable while the dialog is open, so it loads once. In mock mode the list
+  // is read when the dialog opens; the dialog then keeps its own copy.
+  const historyId = dialog?.kind === "history" ? dialog.id : null;
+  const loadHistory = useMemo(
+    () => () => (useApi ? fetchPayments(historyId) : Promise.resolve(local.find((t) => t.id === historyId)?.payments ?? [])),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [useApi, historyId]
+  );
+
+  const setReminder = (id, lastReminder) => setTasks((prev) => prev.map((t) => (t.id === id ? { ...t, lastReminder } : t)));
+
+  // One save per ticket at a time, so a failed save always restores a date the
   // server really had.
-  const logCall = (id) => {
-    const client = clients.find((c) => c.id === id);
-    if (!client || saving.has(id)) return;
-    const prevLastCall = client.lastCall;
+  const remind = (id) => {
+    const task = tasks.find((t) => t.id === id);
+    if (!task || saving.has(id)) return;
+    const previous = task.lastReminder ?? null;
     setSaveError(null);
-    setLastCall(id, today);
+    setReminder(id, today);
     if (!useApi) return;
     setSaving((prev) => new Set(prev).add(id));
-    logClientCall(id)
-      .then((updated) => setLastCall(id, updated.lastCall))
+    logReminder(id)
+      .then((updated) => setReminder(id, updated.lastReminder))
       .catch((err) => {
-        setLastCall(id, prevLastCall);
-        setSaveError(`Could not save the reminder for ${client.name}; it was undone. ${err.message}`);
+        setReminder(id, previous);
+        setSaveError(`Could not save the reminder for ${id}; it was undone. ${err.message}`);
       })
       .finally(() => setSaving((prev) => { const next = new Set(prev); next.delete(id); return next; }));
   };
 
-  const totalDue = isAdmin ? clients.reduce((s, c) => s + c.due, 0) : 0;
-  const pendingCount = clients.filter(paymentPending).length;
-  const overdueCount = clients.filter((c) => c.status === "overdue").length;
-  const calledToday = clients.filter((c) => c.lastCall === today).length;
-
-  const visible = filter === "all" ? clients : clients.filter((c) => c.status === filter);
+  const counts = receivableCounts(tasks);
+  const totals = receivableTotals(tasks);
+  const visible = useMemo(() => sortReceivables(filterReceivables(filterTasks(tasks, query), filter)), [tasks, query, filter]);
+  const tile = "border rounded-md p-4 sm:p-5 shadow-sm";
+  const tileLabel = "f-mono text-[11px] uppercase tracking-wider mb-1";
+  const tileValue = "f-display text-xl sm:text-2xl font-bold";
 
   return (
     <div style={{ background: C.paper }} className="min-h-[calc(100vh-4rem)] grid-bg py-6 sm:py-10">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <div className="mb-6 flex items-end justify-between gap-4 flex-wrap">
-          <div>
-            <div style={{ color: C.orangeDeep }} className="f-mono text-xs font-semibold tracking-wider uppercase mb-1">Financial Log</div>
-            <h1 style={{ color: C.ink }} className="f-display text-2xl sm:text-3xl font-bold">Payment Receivables &amp; Follow-ups</h1>
-          </div>
-          {load.state === "ready" && isAdmin && (
-            <button
-              onClick={() => setEditing("new")}
-              style={{ background: C.orange, color: C.paper }}
-              className="f-body text-sm font-semibold px-4 py-2 rounded shadow-sm hover:opacity-90 active:scale-95 transition-all inline-flex items-center gap-1.5"
-            >
-              <Plus size={16} /> Add Client
-            </button>
-          )}
+        <div className="mb-6">
+          <div style={{ color: C.orangeDeep }} className="f-mono text-xs font-semibold tracking-wider uppercase mb-1">Receivables</div>
+          <h1 style={{ color: C.ink }} className="f-display text-2xl sm:text-3xl font-bold">Payments by ticket</h1>
+          <p style={{ color: C.steel }} className="f-body text-sm mt-1 max-w-2xl">
+            Every ticket on the Work Board is listed here with its payment. {isAdmin ? "Set the amount to charge, then record what comes in, in part or in full." : "Amounts are shown to the admin only."}
+          </p>
         </div>
 
         {load.state === "loading" && (
@@ -1497,84 +1640,97 @@ function Payments({ isAdmin }) {
         {load.state === "error" && (
           <div style={{ borderColor: C.orangeDeep, background: "#FDF0EA" }} className="border rounded-md p-6 text-center">
             <p style={{ color: C.orangeDeep }} className="f-body text-sm mb-3">Could not load payments. {load.message}</p>
-            <button
-              onClick={retry}
-              style={{ background: C.navy, color: C.paper }}
-              className="f-body text-xs font-semibold px-4 py-2 rounded shadow-sm hover:opacity-90"
-            >
+            <button onClick={retry} style={{ background: C.navy, color: C.paper }} className="f-body text-xs font-semibold px-4 py-2 rounded shadow-sm hover:opacity-90">
               Retry
             </button>
           </div>
         )}
 
         {load.state === "ready" && (<>
-        {saveError && (
-          <div role="alert" style={{ borderColor: C.orangeDeep, background: "#FDF0EA", color: C.orangeDeep }} className="border rounded-md px-4 py-3 mb-4 f-body text-sm flex items-start justify-between gap-3">
-            <span>{saveError}</span>
-            <button onClick={() => setSaveError(null)} aria-label="Dismiss" className="shrink-0"><X size={16} /></button>
-          </div>
-        )}
+          {saveError && (
+            <div role="alert" style={{ borderColor: C.orangeDeep, background: "#FDF0EA", color: C.orangeDeep }} className="border rounded-md px-4 py-3 mb-4 f-body text-sm flex items-start justify-between gap-3">
+              <span>{saveError}</span>
+              <button onClick={() => setSaveError(null)} aria-label="Dismiss" className="shrink-0"><X size={16} /></button>
+            </div>
+          )}
 
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-8">
-          <div style={{ background: C.navy }} className="rounded-md p-5 shadow-sm text-white">
-            <div style={{ color: C.blueLight }} className="f-mono text-xs uppercase tracking-wider mb-1">{isAdmin ? "Total Outstanding" : "Payments Pending"}</div>
-            <div data-testid="total-tile" className="f-display text-2xl sm:text-3xl font-bold">
-              {isAdmin ? fmtINR(totalDue) : <>{pendingCount} <span className="text-sm font-normal opacity-70">of {clients.length} clients</span></>}
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4 mb-6">
+            <div style={{ background: C.navy, borderColor: C.navy }} className={`${tile} text-white`}>
+              <div style={{ color: C.blueLight }} className={tileLabel}>{isAdmin ? "Total due" : "Payment pending"}</div>
+              <div data-testid="total-tile" className={tileValue}>
+                {isAdmin ? fmtINR(totals.outstanding) : <>{counts.unpaid + counts.part} <span className="text-sm font-normal opacity-70">of {counts.all} tickets</span></>}
+              </div>
+            </div>
+            <div style={{ background: C.card, borderColor: C.line }} className={tile}>
+              <div style={{ color: C.steel }} className={tileLabel}>{isAdmin ? "Received so far" : "Paid"}</div>
+              <div data-testid="received-tile" style={{ color: C.green }} className={tileValue}>{isAdmin ? fmtINR(totals.received) : counts.paid}</div>
+            </div>
+            <div style={{ background: C.card, borderColor: C.line }} className={tile}>
+              <div style={{ color: C.steel }} className={tileLabel}>Part paid</div>
+              <div data-testid="part-tile" style={{ color: C.blue }} className={tileValue}>{counts.part}</div>
+            </div>
+            <div style={{ background: C.card, borderColor: C.line }} className={tile}>
+              <div style={{ color: C.steel }} className={tileLabel}>Amount not set</div>
+              <div data-testid="unset-tile" style={{ color: counts.unset > 0 ? C.orangeDeep : C.steel }} className={tileValue}>{counts.unset}</div>
             </div>
           </div>
-          <div style={{ background: C.card, borderColor: C.line }} className="border rounded-md p-5 shadow-sm">
-            <div style={{ color: C.steel }} className="f-mono text-xs uppercase tracking-wider mb-1">Overdue Accounts</div>
-            <div style={{ color: C.orangeDeep }} className="f-display text-2xl sm:text-3xl font-bold">{overdueCount}</div>
+
+          <div className="relative mb-3 max-w-md">
+            <Search size={15} style={{ color: C.steel }} className="absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+            <input
+              type="search"
+              aria-label="Search tickets"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search by NK number, work or customer"
+              style={{ borderColor: C.line, color: C.ink }}
+              className={`${INPUT_CLASS} pl-9`}
+            />
           </div>
-          <div style={{ background: C.card, borderColor: C.line }} className="border rounded-md p-5 shadow-sm">
-            <div style={{ color: C.steel }} className="f-mono text-xs uppercase tracking-wider mb-1">Followed Up Today</div>
-            <div style={{ color: C.green }} className="f-display text-2xl sm:text-3xl font-bold">
-              {calledToday} <span className="text-sm font-normal text-stone-500">/ {pendingCount} pending</span>
+
+          <div className="flex items-center gap-2 mb-5 overflow-x-auto pb-2 no-scrollbar">
+            {RECEIVABLE_FILTERS.map((f) => (
+              <button
+                key={f.id}
+                onClick={() => setFilter(f.id)}
+                aria-pressed={filter === f.id}
+                style={{ background: filter === f.id ? C.navy : C.card, color: filter === f.id ? C.paper : C.ink, borderColor: C.line }}
+                className="f-body text-xs px-4 py-2 rounded border font-medium whitespace-nowrap shadow-sm shrink-0"
+              >
+                {f.label} ({counts[f.id]})
+              </button>
+            ))}
+          </div>
+
+          {visible.length === 0 ? (
+            <div data-testid="receivables-empty" style={{ borderColor: C.line, color: C.steel, background: C.card }} className="border border-dashed rounded-md p-10 text-center f-body text-sm">
+              {tasks.length === 0 ? "No tickets yet. Work added on the Work Board appears here." : "No tickets in this list."}
             </div>
-          </div>
-        </div>
-
-        <div className="flex items-center gap-2 mb-6 overflow-x-auto pb-2 no-scrollbar">
-          {[
-            { id: "all", label: "All Accounts" },
-            { id: "overdue", label: "Overdue" },
-            { id: "due-soon", label: "Due Soon" },
-            { id: "paid", label: "Fully Paid" },
-          ].map((f) => (
-            <button
-              key={f.id}
-              onClick={() => setFilter(f.id)}
-              style={{
-                background: filter === f.id ? C.navy : C.card,
-                color: filter === f.id ? C.paper : C.ink,
-                borderColor: C.line,
-              }}
-              className="f-body text-xs px-4 py-2 rounded border font-medium whitespace-nowrap shadow-sm shrink-0"
-            >
-              {f.label}
-            </button>
-          ))}
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
-          {visible.map((c) => (
-            <ClientCard key={c.id} client={c} onCallLogged={logCall} onEdit={setEditing} onPayment={setPaying} onHistory={setHistory} busy={saving.has(c.id)} isAdmin={isAdmin} />
-          ))}
-        </div>
+          ) : (
+            <ul style={{ borderColor: C.line, background: C.card }} className="border rounded-md shadow-sm overflow-hidden">
+              {visible.map((t) => (
+                <ReceivableRow
+                  key={t.id}
+                  task={t}
+                  employees={employees}
+                  isAdmin={isAdmin}
+                  busy={saving.has(t.id)}
+                  onAmount={(task) => setDialog({ kind: "amount", id: task.id })}
+                  onPayment={(task) => setDialog({ kind: "payment", id: task.id })}
+                  onPaid={(task) => setDialog({ kind: "paid", id: task.id })}
+                  onHistory={(task) => setDialog({ kind: "history", id: task.id })}
+                  onReminder={remind}
+                />
+              ))}
+            </ul>
+          )}
         </>)}
       </div>
 
-      {editing && (
-        <ClientForm
-          key={editing === "new" ? "new" : editing.id}
-          client={editing === "new" ? null : editing}
-          onSave={saveClient}
-          onDelete={removeClient}
-          onClose={() => setEditing(null)}
-        />
-      )}
-      {paying && <PaymentForm key={paying.id} client={paying} onSave={savePayment} onClose={() => setPaying(null)} />}
-      {history && <PaymentHistory key={history.id} client={clients.find((c) => c.id === history.id) ?? history} load={loadHistory} onClose={() => setHistory(null)} />}
+      {open && dialog.kind === "amount" && <AmountForm key={open.id} task={open} onSave={saveFee} onClose={() => setDialog(null)} />}
+      {open && dialog.kind === "payment" && <PaymentForm key={open.id} task={open} onSave={savePayment} onClose={() => setDialog(null)} />}
+      {open && dialog.kind === "paid" && <ConfirmPaid key={open.id} task={open} onConfirm={markPaid} onClose={() => setDialog(null)} />}
+      {open && dialog.kind === "history" && <PaymentHistory key={open.id} task={open} load={loadHistory} onRemove={takeBack} onClose={() => setDialog(null)} />}
     </div>
   );
 }
@@ -1885,8 +2041,8 @@ function Team({ viewer, access }) {
         <h1 style={{ color: C.ink }} className="f-display text-2xl sm:text-3xl font-bold flex items-center gap-2"><UserRound size={24} /> Team profiles</h1>
         <p style={{ color: C.steel }} className="f-body text-sm mt-1 mb-6">
           {viewer.isAdmin
-            ? "Each person has a profile. Give them a password here and tell them in person. They then pick their name on the sign-in screen and can update and move the work assigned to them."
-            : "Each person has a profile. Once the admin gives you a password, pick your name on the sign-in screen to update and move the work assigned to you."}
+            ? "Each person has a profile. Give them a password here and tell them in person. They then pick their name on the sign-in screen and can edit the details of the work assigned to them."
+            : "Each person has a profile. Once the admin gives you a password, pick your name on the sign-in screen to edit the details of the work assigned to you."}
         </p>
         {!viewer.isAdmin && (
           <AccessNote testId="team-access" icon={Eye} title="Only the admin can set or change passwords" actionLabel={viewer.employeeId ? undefined : "Switch sign-in"} onAction={viewer.employeeId ? undefined : access?.onSwitchSignIn}>
@@ -1919,6 +2075,202 @@ function Team({ viewer, access }) {
                 onClear={onClear}
               />
             ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
+/* ---------------------------------------------------------------
+   ACTIVITY LOG (admin only: who changed what, and when)
+------------------------------------------------------------------*/
+const ACTOR_COLORS = { person: C.navy, admin: C.orangeDeep, office: C.steel, public: C.blue, unknown: C.orangeDeep, open: C.steel };
+
+// One line of the log. Opens to show the before and after of each field and
+// where the request came from.
+function ActivityEntry({ entry, employees }) {
+  const [open, setOpen] = useState(false);
+  const rows = open ? changeRows(entry, employees) : [];
+  return (
+    <li data-testid="activity-entry" style={{ borderColor: C.line }} className="border-t first:border-t-0">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        className="w-full text-left px-4 py-3 flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-4 hover:bg-black/[0.02]"
+      >
+        <div className="flex items-center gap-3 sm:w-64 shrink-0">
+          <span style={{ color: C.steel }} className="f-mono text-xs w-16 shrink-0">{timeLabel(entry.at)}</span>
+          <span
+            data-testid="activity-actor"
+            style={{ color: ACTOR_COLORS[entry.actorType] ?? C.steel, borderColor: C.line, background: C.paper }}
+            className="f-body text-xs font-semibold px-2 py-0.5 rounded border truncate"
+          >
+            {entry.actorName}
+          </span>
+        </div>
+        <span data-testid="activity-summary" style={{ color: C.ink }} className="f-body text-sm flex-1 leading-snug">{entry.summary}</span>
+        <span className="flex items-center gap-2 shrink-0">
+          <span style={{ color: C.steel }} className="f-mono text-[10px] uppercase tracking-wider">{kindLabel(entry.action)}</span>
+          <ChevronDown size={15} style={{ color: C.steel }} className={open ? "rotate-180 transition-transform" : "transition-transform"} />
+        </span>
+      </button>
+      {open && (
+        <div data-testid="activity-detail" style={{ background: C.paper, borderColor: C.line }} className="border-t px-4 py-3">
+          {rows.length > 0 && (
+            <div className="overflow-x-auto mb-3">
+              <table className="f-body text-xs w-full">
+                <thead>
+                  <tr style={{ color: C.steel }} className="text-left">
+                    <th className="font-semibold py-1 pr-4 w-40">What</th>
+                    <th className="font-semibold py-1 pr-4">Before</th>
+                    <th className="font-semibold py-1">After</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((row) => (
+                    <tr key={row.field} style={{ borderColor: C.line, color: C.ink }} className="border-t align-top">
+                      <td style={{ color: C.steel }} className="py-1.5 pr-4 whitespace-nowrap">{row.label}</td>
+                      <td className="py-1.5 pr-4 break-words">{row.from}</td>
+                      <td className="py-1.5 font-medium break-words">{row.to}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          <div style={{ color: C.steel }} className="f-mono text-[11px] leading-relaxed">
+            Entry #{entry.id} · {dayLabel(dayOf(entry.at))}, {timeLabel(entry.at)} · {deviceLabel(entry.userAgent)}{entry.ip ? ` · from ${entry.ip}` : ""}
+          </div>
+        </div>
+      )}
+    </li>
+  );
+}
+
+// Shown in place of the log to anyone who is not the admin, and in the
+// preview without a server, where nothing is recorded.
+function ActivityUnavailable({ access }) {
+  return (
+    <div style={{ background: C.paper }} className="w-full min-h-[calc(100vh-4rem)]">
+      <div className="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8 py-8 sm:py-12">
+        <h1 style={{ color: C.ink }} className="f-display text-2xl sm:text-3xl font-bold mb-6">Activity log</h1>
+        {hasApi() ? (
+          <AccessNote testId="activity-access" icon={Lock} title="Only the admin can see the activity log" actionLabel="Switch sign-in" onAction={access?.onSwitchSignIn}>
+            <div>It records every change made on this site, who made it and when.</div>
+          </AccessNote>
+        ) : (
+          <AccessNote testId="activity-access" title="Nothing is recorded in this preview">
+            <div>The activity log is kept by the server. This copy of the site runs on sample data without one.</div>
+          </AccessNote>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function Activity() {
+  const [filters, setFilters] = useState({ actor: "", kind: "" });
+  const [entries, setEntries] = useState([]);
+  const [nextBefore, setNextBefore] = useState(null);
+  const [employees, setEmployees] = useState([]);
+  const [load, setLoad] = useState({ state: "loading" });
+  const [attempt, setAttempt] = useState(0);
+  const [more, setMore] = useState({ busy: false, error: null });
+
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all([fetchActivity(filters), fetchEmployees()])
+      .then(([page, people]) => {
+        if (cancelled) return;
+        setEntries(page.entries);
+        setNextBefore(page.nextBefore);
+        setEmployees(people);
+        setLoad({ state: "ready" });
+      })
+      .catch((err) => { if (!cancelled) setLoad({ state: "error", message: err.message }); });
+    return () => { cancelled = true; };
+  }, [filters, attempt]);
+
+  const reload = () => { setLoad({ state: "loading" }); setMore({ busy: false, error: null }); setAttempt((a) => a + 1); };
+  const choose = (change) => { setLoad({ state: "loading" }); setMore({ busy: false, error: null }); setFilters((f) => ({ ...f, ...change })); };
+  const loadOlder = async () => {
+    setMore({ busy: true, error: null });
+    try {
+      const page = await fetchActivity({ ...filters, before: nextBefore });
+      setEntries((prev) => [...prev, ...page.entries]);
+      setNextBefore(page.nextBefore);
+      setMore({ busy: false, error: null });
+    } catch (err) {
+      setMore({ busy: false, error: err.message });
+    }
+  };
+
+  const today = localDay();
+  const groups = groupByDay(entries);
+  const selectStyle = { borderColor: C.line, color: C.ink };
+
+  return (
+    <div style={{ background: C.paper }} className="w-full min-h-[calc(100vh-4rem)]">
+      <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8 sm:py-12">
+        <div style={{ color: C.orangeDeep }} className="f-mono text-xs font-semibold tracking-wider uppercase mb-1">Admin</div>
+        <h1 style={{ color: C.ink }} className="f-display text-2xl sm:text-3xl font-bold flex items-center gap-2"><ScrollText size={24} /> Activity log</h1>
+        <p style={{ color: C.steel }} className="f-body text-sm mt-1 mb-6 max-w-2xl">
+          Every change made on this site, who made it and when. Entries are written by the server as the change is saved and cannot be edited or deleted, by anyone.
+        </p>
+
+        <div className="flex flex-col sm:flex-row sm:items-end gap-3 mb-6">
+          <label className="f-body text-xs font-semibold flex-1 sm:max-w-xs" style={{ color: C.steel }}>
+            Who
+            <select aria-label="Who" value={filters.actor} onChange={(e) => choose({ actor: e.target.value })} style={selectStyle} className={`${INPUT_CLASS} mt-1`}>
+              {actorFilters(employees).map((f) => <option key={f.id} value={f.id}>{f.label}</option>)}
+            </select>
+          </label>
+          <label className="f-body text-xs font-semibold flex-1 sm:max-w-xs" style={{ color: C.steel }}>
+            What
+            <select aria-label="What" value={filters.kind} onChange={(e) => choose({ kind: e.target.value })} style={selectStyle} className={`${INPUT_CLASS} mt-1`}>
+              {KIND_FILTERS.map((f) => <option key={f.id} value={f.id}>{f.label}</option>)}
+            </select>
+          </label>
+          <button onClick={reload} style={{ borderColor: C.line, color: C.ink, background: C.card }} className="f-body text-xs font-semibold px-4 py-2.5 rounded border shadow-sm flex items-center justify-center gap-2 hover:opacity-80">
+            <RefreshCw size={13} /> Refresh
+          </button>
+        </div>
+
+        {load.state === "loading" && <div style={{ borderColor: C.line, color: C.steel, background: C.card }} className="border rounded-md p-10 text-center f-body text-sm">Loading activity…</div>}
+        {load.state === "error" && (
+          <div style={{ borderColor: C.orangeDeep, background: "#FDF0EA" }} className="border rounded-md p-6 text-center">
+            <p style={{ color: C.orangeDeep }} className="f-body text-sm mb-3">Could not load the activity log. {load.message}</p>
+            <button onClick={reload} style={{ background: C.navy, color: C.paper }} className="f-body text-xs font-semibold px-4 py-2 rounded shadow-sm hover:opacity-90">Retry</button>
+          </div>
+        )}
+        {load.state === "ready" && entries.length === 0 && (
+          <div data-testid="activity-empty" style={{ borderColor: C.line, color: C.steel, background: C.card }} className="border border-dashed rounded-md p-10 text-center f-body text-sm">
+            {filters.actor || filters.kind ? "Nothing recorded for this choice." : "Nothing recorded yet. Changes appear here from now on."}
+          </div>
+        )}
+        {load.state === "ready" && groups.map((group) => (
+          <section key={group.day} className="mb-6">
+            <h2 style={{ color: C.steel }} className="f-mono text-xs font-semibold tracking-wider uppercase mb-2 px-1">
+              {group.day === today ? "Today · " : ""}{dayLabel(group.day)}
+            </h2>
+            <ul style={{ borderColor: C.line, background: C.card }} className="border rounded-md shadow-sm overflow-hidden">
+              {group.entries.map((entry) => <ActivityEntry key={entry.id} entry={entry} employees={employees} />)}
+            </ul>
+          </section>
+        ))}
+        {load.state === "ready" && entries.length > 0 && (
+          <div className="text-center">
+            {more.error && <p role="alert" style={{ color: C.orangeDeep }} className="f-body text-sm mb-3">Could not load older entries. {more.error}</p>}
+            {nextBefore !== null ? (
+              <button data-testid="activity-older" onClick={loadOlder} disabled={more.busy} style={{ background: C.navy, color: C.paper }} className="f-body text-xs font-semibold px-5 py-2.5 rounded shadow-sm hover:opacity-90 disabled:opacity-60">
+                {more.busy ? "Loading…" : "Show older entries"}
+              </button>
+            ) : (
+              <p data-testid="activity-end" style={{ color: C.steel }} className="f-body text-xs">That is everything recorded{filters.actor || filters.kind ? " for this choice" : ""}.</p>
+            )}
           </div>
         )}
       </div>
@@ -2015,7 +2367,7 @@ function SignIn({ people, methods, onSignIn }) {
           </select>
         </Field>
         {chosen.value === "shared" && methods.admin && methods.office && (
-          <p style={{ color: C.steel }} className="f-body text-xs mt-1.5">The admin password manages all work and shows amounts. The office password can only view.</p>
+          <p style={{ color: C.steel }} className="f-body text-xs mt-1.5">The admin password can edit and delete any work and shows amounts. The office password can add and move work.</p>
         )}
       </div>
       {chosen.ready ? (
@@ -2033,7 +2385,7 @@ function SignIn({ people, methods, onSignIn }) {
       )}
       {!methods.admin && (
         <div data-testid="no-admin-note" role="note" style={{ borderColor: C.orangeDeep, background: "#FDF0EA", color: C.orangeDeep }} className="border rounded-md px-3 py-2 mt-3 f-body text-sm">
-          No admin password is set on the server yet, so nobody can add or move work, set up profiles or see amounts. Add ADMIN_PASSWORD in the Render dashboard.
+          No admin password is set on the server yet, so nobody can set up profiles, delete work or see amounts. Add ADMIN_PASSWORD in the Render dashboard.
         </div>
       )}
       {error && (
@@ -2115,6 +2467,9 @@ export default function App() {
   // Mock mode only: enquiries live here so the landing page form and the
   // Enquiries page share one list.
   const [localEnquiries, setLocalEnquiries] = useState(INITIAL_ENQUIRIES);
+  // Mock mode only: the tickets live here so the Work Board and Receivables
+  // always show the same ones.
+  const [localTasks, setLocalTasks] = useState(INITIAL_TASKS);
   const sendLocalEnquiry = async (form) => {
     setLocalEnquiries((prev) => [
       { id: Math.max(0, ...prev.map((e) => e.id)) + 1, name: form.name.trim(), phone: form.phone.trim(), message: form.message.trim() || null, status: "new", createdAt: localDay() },
@@ -2129,12 +2484,30 @@ export default function App() {
         onSignOut={signedIn ? staff.signOut : null}
         userName={signedIn ? viewerLabel(staff.session) : null}
         showTeam={hasApi() && (signedIn || staff.session.state === "open")}
+        showActivity={hasApi() && staff.isAdmin && (signedIn || staff.session.state === "open")}
       />
       <main>
         {page === "home" && <Landing setPage={setPage} onEnquiry={hasApi() ? sendEnquiry : sendLocalEnquiry} />}
-        {page === "work" && <StaffOnly staff={staff}><WorkBoard key={`${staff.session.role}-${staff.session.employeeId}`} viewer={staff.viewer} access={access} /></StaffOnly>}
-        {page === "payments" && <StaffOnly staff={staff}><Payments key={staff.session.role} isAdmin={staff.isAdmin} /></StaffOnly>}
+        {(page === "work" || page === "completed") && (
+          <StaffOnly staff={staff}>
+            <WorkBoard
+              key={`${staff.session.role}-${staff.session.employeeId}`}
+              viewer={staff.viewer}
+              access={access}
+              view={page === "completed" ? "completed" : "board"}
+              onView={(next) => setPage(next === "completed" ? "completed" : "work")}
+              local={localTasks}
+              setLocal={setLocalTasks}
+            />
+          </StaffOnly>
+        )}
+        {page === "payments" && <StaffOnly staff={staff}><Payments key={staff.session.role} isAdmin={staff.isAdmin} local={localTasks} setLocal={setLocalTasks} /></StaffOnly>}
         {page === "team" && <StaffOnly staff={staff}><Team key={`${staff.session.role}-${staff.session.employeeId}`} viewer={staff.viewer} access={access} /></StaffOnly>}
+        {page === "activity" && (
+          <StaffOnly staff={staff}>
+            {hasApi() && staff.isAdmin ? <Activity key={staff.session.role} /> : <ActivityUnavailable access={access} />}
+          </StaffOnly>
+        )}
         {page === "enquiries" && <StaffOnly staff={staff}><Enquiries local={localEnquiries} setLocal={setLocalEnquiries} /></StaffOnly>}
       </main>
     </div>

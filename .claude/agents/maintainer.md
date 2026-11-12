@@ -32,7 +32,7 @@ The UI in `apps/frontend/src/App.jsx` reads these literal values and will break 
 
 - Task `status`: `todo` | `inprogress` | `done`
 - Task `priority`: `low` | `medium` | `high`
-- Client `status`: `paid` | `due-soon` | `overdue`
+- Task `paymentStatus`: `unset` | `unpaid` | `part` | `paid` (worked out from `fee` and the payments, never stored)
 - Dates in the UI are `YYYY-MM-DD` strings; the API returns ISO timestamps. Convert at the boundary, don't change the API's format.
 
 When in doubt about what "working" means, the seeded data in `apps/backend/prisma/seed.js` mirrors what the site shows today.

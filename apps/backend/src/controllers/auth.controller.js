@@ -5,12 +5,14 @@ import {
   issuePersonToken,
   issueToken,
   loginBlocked,
+  MAX_FAILED_LOGINS,
   passwordMatches,
   recordFailedLogin,
   roleForPassword,
   sharedSignIns,
   viewerFromRequest,
 } from "../lib/auth.js";
+import { actorForViewer, logActivity } from "../lib/activity.js";
 
 // Tells the frontend whether to show a sign-in screen and what the viewer may
 // see. Never returns 401. role is "admin", "staff" or null (not signed in);
@@ -51,23 +53,45 @@ export async function login(req, res) {
     return res.status(429).json({ error: "Too many wrong attempts. Wait 15 minutes and try again." });
   }
   const { password, as } = req.body ?? {};
-  const wrong = () => {
-    recordFailedLogin(req.ip);
+  // Sign-ins go into the activity log, right and wrong. A wrong attempt is by
+  // nobody we know; the entry says whose sign-in was tried.
+  const wrong = async (target, whose) => {
+    const lockedNow = recordFailedLogin(req.ip);
+    await logActivity(prisma, req, {
+      action: "session.sign_in_failed",
+      entityType: "session",
+      entityId: target,
+      summary: `Wrong password for ${whose}` + (lockedNow ? `; attempt ${MAX_FAILED_LOGINS}, so this address is locked out for 15 minutes` : ""),
+      actor: actorForViewer(null),
+    });
     res.status(401).json({ error: "Wrong password." });
+  };
+  const signedIn = async (viewer, target) => {
+    clearFailedLogins(req.ip);
+    const actor = actorForViewer(viewer);
+    await logActivity(prisma, req, {
+      action: "session.signed_in",
+      entityType: "session",
+      entityId: target,
+      summary: `${actor.actorName} signed in`,
+      actor,
+    });
   };
 
   if (as !== undefined && as !== "shared" && as !== "admin" && as !== "office") {
     const employee =
       typeof as === "string" && as.length <= 40
-        ? await prisma.employee.findUnique({ where: { id: as }, select: { id: true, passwordHash: true } })
+        ? await prisma.employee.findUnique({ where: { id: as }, select: { id: true, name: true, passwordHash: true } })
         : null;
-    if (!employee?.passwordHash || !(await passwordMatches(password, employee.passwordHash))) return wrong();
-    clearFailedLogins(req.ip);
+    if (!employee?.passwordHash || !(await passwordMatches(password, employee.passwordHash))) {
+      return wrong(employee?.id ?? null, employee ? `${employee.name}'s sign-in` : "a sign-in that does not exist");
+    }
+    await signedIn({ role: "staff", employeeId: employee.id, name: employee.name }, employee.id);
     return res.json(issuePersonToken(employee));
   }
 
   const role = roleForPassword(password);
-  if (!role) return wrong();
-  clearFailedLogins(req.ip);
+  if (!role) return wrong("shared", "the office or admin sign-in");
+  await signedIn({ role, employeeId: null, name: null }, role === "admin" ? "admin" : "office");
   res.json(issueToken(role));
 }

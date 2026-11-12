@@ -51,34 +51,29 @@ model Task {
   // columns: their real dates are unknown.
   createdAt   DateTime?
   completedAt DateTime?
+
+  // Receivables. fee is the amount to charge for this work in whole rupees:
+  // null until the admin sets it, 0 for work that is not charged. Only an
+  // admin sees or changes it. lastReminder is when someone last logged a
+  // payment reminder call to the customer.
+  fee          Int?
+  lastReminder DateTime?
+  payments     Payment[]
 }
 
-model Client {
-  id          String   @id
-  name        String
-  contact     String
-  phone       String
-  due         Int
-  invoiceDate DateTime
-  lastCall    DateTime
-  // Matches PAY_STATUS_META keys: "paid" | "due-soon" | "overdue"
-  status      String
-  notes       String?
-  payments    Payment[]
-}
-
-// Money received from a client. Recording one lowers Client.due in the same
-// transaction, so the payments are the history behind the current balance.
+// Money received for a piece of work. A ticket's payment status is never
+// stored: it is worked out from Task.fee and the payments recorded against it,
+// so the Work Board and Receivables cannot disagree.
 model Payment {
   id         Int      @id @default(autoincrement())
-  clientId   String
-  client     Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  taskId     String
+  task       Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
   // Whole rupees, always more than zero.
   amount     Int
   receivedAt DateTime @default(now())
   note       String?
 
-  @@index([clientId])
+  @@index([taskId])
 }
 
 // A message sent from the public landing page. Anyone can create one; only
@@ -92,4 +87,44 @@ model Enquiry {
   // "new" | "contacted" | "closed"
   status    String   @default("new")
   createdAt DateTime @default(now())
+}
+
+// The activity log: who did what, and when. One row for every change made
+// through the API, written in the same transaction as the change, so there is
+// never a change without its entry. Rows are only ever added: the API has no
+// route that edits or removes them, and a database trigger (see the migration)
+// refuses UPDATE, DELETE and TRUNCATE on this table.
+model ActivityLog {
+  id Int      @id @default(autoincrement())
+  // Set by the database, not by the request.
+  at DateTime @default(now())
+
+  // Who. actorType is "person" (a personal sign-in; actorId is the employee
+  // id), "admin" or "office" (the shared passwords), "public" (the website
+  // enquiry form), "unknown" (a failed sign-in) or "open" (sign-in switched
+  // off). actorName is the name as it was at the time.
+  actorType String
+  actorId   String?
+  actorName String
+
+  // What: "<type>.<verb>", for example "task.moved" or "payment.recorded".
+  action     String
+  // The record it was done to. Plain values with no foreign key, so entries
+  // outlive the record they describe.
+  entityType String
+  entityId   String?
+  // One readable line, complete without the record ("Moved NK-104 ... ").
+  summary    String
+  // Field by field: { "<field>": { "from": ..., "to": ... } }. Everything on a
+  // new record has from null; everything on a deleted one has to null. Never
+  // holds passwords or their hashes.
+  changes    Json?
+
+  // Where from.
+  ip        String?
+  userAgent String?
+
+  @@index([at])
+  @@index([actorId, id])
+  @@index([entityType, entityId, id])
 }

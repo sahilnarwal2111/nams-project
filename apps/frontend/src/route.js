@@ -2,7 +2,9 @@
 // can be bookmarked or shared. Plain anchors such as "#services" stay on the
 // home page and scroll to that section.
 
-export const PAGES = ["home", "work", "payments", "enquiries", "team"];
+// "completed" is the Work Board's list of finished work. "activity" is the
+// admin's log of who changed what.
+export const PAGES = ["home", "work", "completed", "payments", "enquiries", "team", "activity"];
 
 export function pageFromHash(hash) {
   const match = /^#\/([\w-]*)/.exec(hash ?? "");

@@ -2,11 +2,11 @@ import express from "express";
 import cors from "cors";
 import { employeesRouter } from "./routes/employees.routes.js";
 import { tasksRouter } from "./routes/tasks.routes.js";
-import { clientsRouter } from "./routes/clients.routes.js";
 import { authRouter } from "./routes/auth.routes.js";
 import { enquiriesRouter } from "./routes/enquiries.routes.js";
 import { teamRouter } from "./routes/team.routes.js";
-import { requireAuth } from "./lib/auth.js";
+import { activityRouter } from "./routes/activity.routes.js";
+import { requireAdmin, requireAuth } from "./lib/auth.js";
 
 export const app = express();
 
@@ -37,7 +37,8 @@ app.use("/api/team", teamRouter);
 // Open while APP_PASSWORD is unset; otherwise these need a signed-in token.
 app.use("/api/employees", requireAuth, employeesRouter);
 app.use("/api/tasks", requireAuth, tasksRouter);
-app.use("/api/clients", requireAuth, clientsRouter);
+// Who did what, and when. Admin only: the entries include amounts.
+app.use("/api/activity", requireAuth, requireAdmin, activityRouter);
 // Sending an enquiry is public; the router guards the staff-only routes itself.
 app.use("/api/enquiries", enquiriesRouter);
 
