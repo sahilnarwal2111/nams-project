@@ -1,4 +1,4 @@
--- Definition version 2. Stocks are current, flows use surviving timestamped rows.
+-- Definition version 3. Stocks are current, flows use surviving timestamped rows.
 -- Migration/deployment cutover and legacy coverage need owner verification.
 -- PostgreSQL timestamp-without-time-zone columns contain Prisma UTC values.
 -- Use run-operational-metrics.psql for a bounded, read-only transaction.
@@ -32,24 +32,42 @@ WITH clock AS (
            SELECT 1 FROM "Task" t WHERE t."assigneeId" = e.id AND t.status IN ('todo', 'inprogress')
          )) AS employees_with_open_tasks
   FROM "Employee" e
-), clients AS (
-  SELECT count(*) AS client_records,
-         count(*) FILTER (WHERE due > 0) AS balance_client_records,
-         coalesce(sum(due::bigint), 0) AS recorded_balance_inr,
-         count(*) FILTER (WHERE status = 'overdue' AND due > 0) AS overdue_balance_client_records,
-         coalesce(sum(due::bigint) FILTER (WHERE status = 'overdue' AND due > 0), 0) AS overdue_recorded_balance_inr,
-         count(*) FILTER (WHERE due > 0 AND "lastCall" >= w.day_start_utc AND "lastCall" < w.day_end_utc) AS balance_clients_latest_stamp_previous_day,
-         count(*) FILTER (WHERE due > 0 AND (("lastCall" AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Kolkata')::date <= w.today - 7) AS balance_clients_stamp_age_7d,
-         count(*) FILTER (WHERE "lastCall" > w.observed_at AT TIME ZONE 'UTC') AS future_last_call_records,
-         count(*) FILTER (WHERE status = 'paid' AND due > 0) AS paid_positive_balance_records,
-         count(*) FILTER (WHERE due < 0) AS negative_balance_records,
-         count(*) FILTER (WHERE status NOT IN ('paid', 'due-soon', 'overdue')) AS invalid_client_status_records
-  FROM "Client" CROSS JOIN windows w
+), payment_by_task AS (
+  -- Aggregate before joining: multiple payments must not multiply fees/tasks.
+  SELECT "taskId", sum(amount::bigint) AS received, count(*) AS payment_count
+  FROM "Payment" GROUP BY "taskId"
+), ticket_balances AS (
+  SELECT t.fee, t."lastReminder", coalesce(p.received, 0) AS received,
+         coalesce(p.payment_count, 0) AS payment_count,
+         CASE WHEN t.fee IS NULL THEN 0
+              ELSE greatest(0, t.fee::bigint - coalesce(p.received, 0)) END AS known_outstanding
+  FROM "Task" t LEFT JOIN payment_by_task p ON p."taskId" = t.id
+), receivables AS (
+  SELECT count(*) FILTER (WHERE fee IS NULL) AS fee_unset_tasks,
+         count(*) FILTER (WHERE fee IS NOT NULL) AS known_fee_tasks,
+         count(*) FILTER (WHERE fee = 0) AS zero_fee_tasks,
+         count(*) FILTER (WHERE fee > 0) AS positive_fee_tasks,
+         count(*) FILTER (WHERE fee IS NOT NULL AND received < fee AND received <= 0) AS billing_unpaid_tasks,
+         count(*) FILTER (WHERE fee IS NOT NULL AND received < fee AND received > 0) AS billing_part_paid_tasks,
+         count(*) FILTER (WHERE fee IS NOT NULL AND received >= fee) AS billing_paid_tasks,
+         count(*) FILTER (WHERE fee IS NULL OR received < fee) AS billing_pending_tasks,
+         count(*) FILTER (WHERE known_outstanding > 0) AS outstanding_fee_tasks,
+         coalesce(sum(fee::bigint), 0) AS known_fees_inr,
+         coalesce(sum(received), 0) AS retained_receipts_inr,
+         coalesce(sum(known_outstanding), 0) AS known_outstanding_inr,
+         count(*) FILTER (WHERE known_outstanding > 0 AND "lastReminder" IS NULL) AS outstanding_tasks_without_reminder,
+         count(*) FILTER (WHERE known_outstanding > 0 AND "lastReminder" >= w.day_start_utc AND "lastReminder" < w.day_end_utc) AS outstanding_tasks_latest_reminder_previous_day,
+         count(*) FILTER (WHERE known_outstanding > 0 AND (("lastReminder" AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Kolkata')::date <= w.today - 7) AS outstanding_tasks_reminder_age_7d,
+         count(*) FILTER (WHERE fee < 0) AS negative_fee_tasks,
+         count(*) FILTER (WHERE fee IS NOT NULL AND received > fee) AS fees_below_received_tasks,
+         count(*) FILTER (WHERE fee IS NULL AND payment_count > 0) AS payments_on_unset_fee_tasks,
+         count(*) FILTER (WHERE "lastReminder" > w.observed_at AT TIME ZONE 'UTC') AS future_last_reminder_tasks
+  FROM ticket_balances CROSS JOIN windows w
 ), payment_quality AS (
   SELECT count(*) AS surviving_payment_records,
          count(*) FILTER (WHERE amount <= 0) AS nonpositive_payment_records,
          count(*) FILTER (WHERE "receivedAt" > w.observed_at AT TIME ZONE 'UTC') AS future_payment_records
-  FROM "Payment" CROSS JOIN windows w
+  FROM "Payment" p CROSS JOIN windows w
 ), enquiries AS (
   SELECT count(*) AS enquiry_records,
          count(*) FILTER (WHERE status IN ('new', 'contacted')) AS open_enquiry_records,
@@ -92,14 +110,14 @@ WITH clock AS (
     FROM "Enquiry" WHERE "createdAt" >= f.start_utc AND "createdAt" < f.end_utc
   ) q
 )
-SELECT 2 AS definition_version,
+SELECT 3 AS definition_version, 'task_fee_payment_task_id' AS receivables_model,
        w.observed_at, 'Asia/Kolkata' AS reporting_timezone, w.reporting_day,
        w.day_start_utc, w.day_end_utc, 7 AS stale_stamp_days,
-       t.*, e.*, c.*, p.*, q.*,
+       t.*, e.*, r.*, p.*, q.*,
        (SELECT jsonb_agg(to_jsonb(flows) ORDER BY reporting_day DESC) FROM flows) AS flow_windows,
        t.overdue_open_tasks::numeric / nullif(t.dated_open_tasks, 0) AS overdue_dated_open_fraction,
        e.employees_with_open_tasks::numeric / nullif(e.employee_records, 0) AS roster_with_open_tasks_fraction,
-       c.overdue_recorded_balance_inr::numeric / nullif(c.recorded_balance_inr, 0) AS overdue_balance_fraction,
-       c.balance_clients_latest_stamp_previous_day::numeric / nullif(c.balance_client_records, 0) AS latest_stamp_previous_day_fraction
-FROM windows w CROSS JOIN tasks t CROSS JOIN employees e CROSS JOIN clients c
+       r.known_fee_tasks::numeric / nullif(t.task_records, 0) AS fee_coverage_fraction,
+       r.outstanding_tasks_latest_reminder_previous_day::numeric / nullif(r.outstanding_fee_tasks, 0) AS latest_reminder_previous_day_fraction
+FROM windows w CROSS JOIN tasks t CROSS JOIN employees e CROSS JOIN receivables r
 CROSS JOIN payment_quality p CROSS JOIN enquiries q;

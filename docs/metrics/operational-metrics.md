@@ -1,178 +1,198 @@
-# Operational metrics: candidate definitions, version 2
+# Operational metrics: candidate definitions, version 3
 
 Status: owner review required. These are candidates, not approved KPIs.
 No production access, live values, deployment cutover, or source freshness is verified.
-All verification uses synthetic data. This reporting PR adds no instrumentation, endpoint, schema, or schedule.
+Verification uses synthetic data only. This reporting PR adds no instrumentation, endpoint, application behavior, schema migration, or schedule.
 
 ## Sources and coverage inventory
 
-The branch includes `main` revision `87faad62c2d13e64c3a701cc148a6914c19d28e1`, newer than the requested `d251760dcb1b886ee06fce948709aca03484f60c`.
-See [coverage inventory](coverage.md) for workflow coverage and remaining gaps.
-Source links below resolve to the code reviewed with this reporting query:
+Source baseline: `main` revision `1c1009526f4af2ab0bd1082237fa7a3bcb8f94b4`.
+See the [coverage inventory](coverage.md) for supported workflows and remaining gaps.
 
-- [Schema](../../apps/backend/prisma/schema.prisma): Employee, Task, Client, Payment, and Enquiry fields and relations.
-- [Tasks](../../apps/backend/src/controllers/tasks.controller.js): server creation stamps, completion replacement/clearing, assignment, and permanent deletion.
-- [Payments](../../apps/backend/src/controllers/payments.controller.js): atomic balance decrement and payment creation; caller-supplied `receivedAt` is allowed.
-- [Clients](../../apps/backend/src/controllers/clients.controller.js): balance/status editing, reminder overwrite, deletion, and staff amount restrictions.
-- [Enquiries](../../apps/backend/src/controllers/enquiries.controller.js): server creation time, current status, honeypot suppression, and permanent deletion.
-- [Auth](../../apps/backend/src/lib/auth.js) and [session/login](../../apps/backend/src/controllers/auth.controller.js): optional shared and personal identity, without stored activity events.
-- [Frontend boundary](../../apps/frontend/src/api.js), [workflow UI](../../apps/frontend/src/App.jsx), and [date parser](../../apps/backend/src/lib/dates.js): mock mode, payment requests, calendar dates, and display-local instants.
-- [Seed](../../apps/backend/prisma/seed.js): demo upserts, without task creation/completion stamps or expected dates on fresh rows.
+- [Schema](../../apps/backend/prisma/schema.prisma): Employee, Task, task-linked Payment, Enquiry, and ActivityLog.
+- [Billing rules](../../apps/backend/src/lib/billing.js): received totals and derived unset/unpaid/part/paid status.
+- [Receivables rules](../../apps/frontend/src/receivables.js): known outstanding, zero-fee work, pending filters, and current totals.
+- [Tasks](../../apps/backend/src/controllers/tasks.controller.js): fees, reminder stamps, creation/completion stamps, and task deletion with payment cascade.
+- [Payments](../../apps/backend/src/controllers/payments.controller.js): receipt creation and explicit removal; caller-supplied receipt dates.
+- [Ticket migration](../../apps/backend/prisma/migrations/20261111133000_receivables_by_ticket/migration.sql): deletion of prior payments, removal of Client, and new fee/task link.
+- [Enquiries](../../apps/backend/src/controllers/enquiries.controller.js): server creation time, current status, suppression, and deletion.
+- [Auth](../../apps/backend/src/lib/auth.js), [activity writer](../../apps/backend/src/lib/activity.js), and [activity controller](../../apps/backend/src/controllers/activity.controller.js): personal/shared actors and append-only API audit history.
+- [Activity migration](../../apps/backend/prisma/migrations/20261111121239_add_activity_log/migration.sql): log schema and UPDATE/DELETE/TRUNCATE guards.
+- [Frontend boundary](../../apps/frontend/src/api.js), [date parser](../../apps/backend/src/lib/dates.js), and [seed](../../apps/backend/prisma/seed.js): mock mode, date handling, and synthetic fixtures.
 - [SQL](../../apps/backend/reporting/operational-metrics.sql) and [wrapper](../../apps/backend/reporting/run-operational-metrics.psql): executable definitions and read-only execution.
 
-`Task.client` is free text, not a Client relation. Never join these sources by customer name.
-The SQL aggregates each source separately. Employee assignment uses `Task.assigneeId`, not an activity actor.
+Receivables now belong to a task, also called a ticket. `Task.client` remains free text, not a customer relation or join key.
+There is no Client table in the current schema. The query groups Payment by taskId before joining Task to prevent fee/workload multiplication.
+Employee assignment uses Task.assigneeId, not the actor who performed work. The query does not read ActivityLog.
 
-## Cohorts and reporting dates
+## Cohorts, units, and reporting dates
 
-- **Observation:** one repeatable-read snapshot at `observed_at`. All records must still exist at this observation.
-- **Task cohort:** surviving tasks. Open means `todo` or `inprogress`; done means `done`.
-- **Employee cohort:** every roster row, including staff without tasks. No active-employment flag exists.
-- **Client cohort:** surviving clients. Positive-balance cohort means `due > 0`, regardless of status.
-- **Payment cohort:** surviving Payment rows, regardless of current client balance or status. Do not restrict receipts to clients who still owe money.
+- **Observation:** one repeatable-read snapshot at `observed_at`; source rows must still exist at this observation.
+- **Task cohort:** all surviving tasks, regardless of work status. Open means todo or inprogress; done means done.
+- **Fee cohort:** known fees are non-null; positive fees are greater than zero. Unknown fees are a separate coverage cohort.
+- **Outstanding cohort:** tasks with a known fee and `max(fee - retained received, 0) > 0`.
+- **Employee cohort:** all roster rows, including staff without tasks. No active-employment flag exists.
+- **Payment cohort:** surviving task-linked Payment rows, regardless of task work status or whether its fee is now settled.
 - **Enquiry cohort:** surviving stored enquiries, regardless of current status. Closed enquiries still enter arrival counts.
 - **Exclusions:** no guessed exclusions by names, IDs, or roles. No reliable demo/internal/test flag exists.
-- **Timezone:** Asia/Kolkata is a proposed office reporting timezone, not the browser or database session timezone.
-- **Calendar dates:** read `expectedCompletion` by its stored UTC date. Due today is not overdue.
+- **Units:** money is whole INR, not paise. Counts and amounts have no denominator.
+- **Timezone:** Asia/Kolkata is a proposed reporting timezone, not the database session or browser timezone.
+- **Calendar dates:** read expectedCompletion by its stored UTC date. Due today is not overdue work.
 - **Instants:** Prisma timestamp columns store UTC without a PostgreSQL timezone annotation. Convert UTC to Asia/Kolkata for day membership.
-- **Windows:** use local midnight boundaries, inclusive start and exclusive end. Convert boundaries to UTC before comparisons.
 
-The output has one aggregate row. Top-level workload, balances, quality, roster, and enquiry backlog are **current stocks**, not day-end snapshots.
-The `flow_windows` JSON array contains three independent aggregate windows:
+The query returns one aggregate row. Top-level workload, fees, balances, roster, quality, and enquiry backlog are **current stocks**, not historical closing values.
+`definition_version` is 3 and `receivables_model` is `task_fee_payment_task_id`.
+The nested `flow_windows` array contains three independent local-midnight, half-open windows:
 
-| Label | Local reporting date, when observation date is D | Meaning |
+| Label | Reporting date when observation date is D | Meaning |
 | --- | --- | --- |
 | `last_complete_day` | D minus 1 day | Last complete day |
-| `prior_day` | D minus 2 days | Day immediately before the last complete day |
-| `week_baseline` | D minus 8 days | Same weekday, seven days before the last complete day; NOT a seven-day total |
+| `prior_day` | D minus 2 days | Day before last complete day |
+| `week_baseline` | D minus 8 days | Same weekday seven days before last complete day; NOT a seven-day total |
 
-Each window carries `reporting_day`, `start_utc`, and `end_utc`. UTC boundary strings lack an offset because source columns do; interpret them as UTC.
-Top-level `reporting_day`, `day_start_utc`, and `day_end_utc` refer only to `last_complete_day`.
-Counts and INR amounts have no denominator. Fractions use the denominators below and range from 0 to 1 with valid source data.
-Zero denominators return SQL `NULL`, never zero percent. Empty cohorts return zero counts and amounts, subject to cutover limitations below.
-Report fractions with their numerator and denominator. For count-based fractions, label denominators below 10 as **small sample**.
-This threshold is a proposal, not an approved policy. For the balance fraction, show amounts and positive-balance client count.
+Each entry includes reporting_day, start_utc, and end_utc. The start is inclusive; the end is exclusive.
+UTC boundary strings lack an offset because source columns do; interpret them as UTC.
+Top-level reporting_day/day_start_utc/day_end_utc refer only to last_complete_day.
+Fractions range from 0 to 1 with valid data; a zero denominator returns NULL, never zero percent.
+Show every fraction with numerator and denominator. Proposed small-sample threshold: fewer than 10 denominator records.
+An empty sum returns zero; this does not prove complete source coverage or that unknown fees are zero.
 
-## Current-stock candidates
+## Workload and coverage candidates
 
-| SQL fields | Definition / denominator | Proposed use |
+| SQL fields | Definition / denominator | Proposed decision |
 | --- | --- | --- |
-| `task_records`, `open_tasks`, `inprogress_tasks`, `high_priority_open_tasks` | All tasks; open tasks; in-progress tasks; open tasks with high priority | Backlog and priority review; not activity |
-| `dated_open_tasks`, `undated_open_tasks` | Open tasks with / without an expected date | Schedule coverage; lead with undated count beside open count |
-| `overdue_open_tasks`, `overdue_dated_open_fraction` | Open tasks whose expected UTC date precedes local today; denominator is dated open tasks | Conditional schedule risk, not on-time completion |
-| `employee_records`, `employees_with_open_tasks`, `roster_with_open_tasks_fraction` | Roster count; distinct employees assigned open work; denominator is roster count | Assignment coverage, NOT adoption or utilization |
-| `client_records`, `balance_client_records` | All client rows; rows with positive due | Collection queue context, not unique legal entities |
-| `recorded_balance_inr` | Sum due across all clients, matching the Receivables view; not reconciled with Payment rows | Outstanding balance, not revenue or cash received |
-| `overdue_balance_client_records`, `overdue_recorded_balance_inr`, `overdue_balance_fraction` | Positive-balance rows manually marked overdue; their balance sum; denominator is total recorded balance | Exposure; no contractual due date exists |
-| `balance_clients_latest_stamp_previous_day`, `latest_stamp_previous_day_fraction` | Current positive-balance rows with latest `lastCall` in last complete day; denominator is current positive-balance rows | Diagnostic only, NOT call counts or verified reminders |
-| `balance_clients_stamp_age_7d` | Current positive-balance rows with local lastCall date at least seven calendar days before today | Follow-up proxy; seven days is proposed, not an SLA |
-| `enquiry_records`, `open_enquiry_records` | All stored enquiries; current status new or contacted | Current enquiry queue, not historical queue size |
-| `surviving_payment_records` | All retained payment rows | Coverage context, not lifetime transactions |
+| `task_records`, `open_tasks`, `inprogress_tasks`, `high_priority_open_tasks` | All tasks; open; in-progress; open with high priority | Backlog and priority review, not activity |
+| `dated_open_tasks`, `undated_open_tasks` | Open tasks with / without expectedCompletion | Show missing schedule coverage first |
+| `overdue_open_tasks`, `overdue_dated_open_fraction` | Open tasks whose expected UTC date precedes local today; denominator is dated open tasks | Work schedule risk, NOT payment overdue status |
+| `employee_records`, `employees_with_open_tasks`, `roster_with_open_tasks_fraction` | Roster count; distinct roster employees assigned open work; denominator is roster count | Assignment coverage, not utilization or adoption |
+| `enquiry_records`, `open_enquiry_records` | All stored enquiries; current new/contacted queue | Current queue, not historical queue size |
 
-Expected dates are optional. Fresh seed tasks omit them, so a fresh seed has no dated open tasks and a NULL overdue fraction.
-This describes synthetic seed behavior, not live coverage. Hold the overdue fraction until the owner approves date coverage.
-A proposed gate is `dated_open_tasks / open_tasks >= 0.8`; coverage is undefined without open tasks.
-The query does not apply this publication gate automatically.
+Expected dates are optional. Fresh seed tasks omit them, so fresh-seed date coverage is empty; this is not a live-data claim.
+Hold the overdue fraction until the owner approves coverage. Proposed gate: dated_open_tasks/open_tasks at least 0.8; undefined without open tasks.
+The query does not apply publication gates automatically. ExpectedCompletion is a work deadline, not an invoice/payment due date.
+
+## Ticket receivables candidates
+
+For each task, received means the sum of retained Payment.amount rows linked through taskId; no rows means zero received.
+Fee is the amount to charge, not the outstanding balance. Payments do not decrement fee.
+
+| SQL fields | Definition / denominator | Coverage and decision |
+| --- | --- | --- |
+| `fee_unset_tasks` | Tasks with fee NULL | Unknown amount, not zero charge or settled work |
+| `known_fee_tasks`, `zero_fee_tasks`, `positive_fee_tasks` | Non-null fee; fee exactly zero; fee greater than zero | Separate coverage from deliberate no-charge work |
+| `fee_coverage_fraction` | known_fee_tasks / task_records | Fee-entry coverage; zero fees count as known |
+| `billing_unpaid_tasks` | Known fee with received below fee and received at most zero | Derived unpaid state, matching billing.js |
+| `billing_part_paid_tasks` | Known fee with received above zero but below fee | Derived part-paid state |
+| `billing_paid_tasks` | Known fee with received at least fee | Includes zero-fee no-charge work; not a paid-customer count |
+| `billing_pending_tasks` | Fee unknown OR received below known fee | Matches pending filter; includes unknown fees without quantified debt |
+| `outstanding_fee_tasks` | Known positive outstanding balance | Denominator for reminder diagnostics |
+| `known_fees_inr` | Sum non-null fees across all work statuses | Recorded charges only; unknown amounts excluded, not imputed |
+| `retained_receipts_inr` | Sum retained linked receipts across all tasks | Current retained receipt total, not lifetime cash or revenue |
+| `known_outstanding_inr` | Sum max(fee - received, 0) for known fees; unknown fees contribute no quantified amount | Matches Receivables outstanding tile; incomplete when fees are unknown |
+| `outstanding_tasks_without_reminder` | Outstanding cohort with lastReminder NULL | No retained reminder stamp; separate from old stamps |
+| `outstanding_tasks_latest_reminder_previous_day` | Outstanding cohort whose latest lastReminder falls in last complete day | Latest-stamp diagnostic, not count of calls or reminder events |
+| `latest_reminder_previous_day_fraction` | Previous metric / outstanding_fee_tasks | Current cohort in both numerator and denominator |
+| `outstanding_tasks_reminder_age_7d` | Outstanding cohort with local reminder date at least seven calendar days before today | Proposed follow-up threshold, not an SLA; excludes NULL stamps |
+| `surviving_payment_records` | Count all retained Payment rows | Coverage context, not complete lifetime transactions |
+
+Show fee_unset_tasks and fee_coverage_fraction beside known_outstanding_inr. A zero known balance with unset fees is not proof that nothing is owed.
+Zero fee means explicitly not charged and derives paid with no receipts. NULL fee derives unset, even if corrupt direct writes attach payments.
+Work status does not filter financial cohorts: done work can remain unpaid, and open work can already be paid.
+No stored Client.status, invoiceDate, lastCall, or manual payment-overdue category remains. Do not invent replacements from work dates.
+LastReminder starts NULL, not at creation; updates replace only the latest stamp. A stamp alone does not prove customer contact.
 
 ## Timestamp-window candidates
 
-The following keys appear in each `flow_windows` entry. They describe retained rows at observation, not an immutable event ledger.
+These keys appear in each flow_windows entry. They describe surviving records, not a complete immutable cash or event ledger.
 
-| SQL key | Numerator / denominator or unit | Coverage and decision |
+| SQL key | Numerator / denominator or unit | Coverage limit |
 | --- | --- | --- |
-| `task_created_records` | Tasks with non-null createdAt inside the window | Recorded task intake; excludes unknown creation dates and deleted tasks |
-| `currently_done_completion_records` | Tasks currently done with non-null completedAt inside the window | Latest recorded completion episode only; NOT all completion transitions |
-| `dated_currently_done_completion_records` | Previous cohort with non-null expectedCompletion | Denominator for dated completion quality |
-| `on_time_currently_done_completion_records` | Dated completion cohort whose local completion day is on/before expected UTC date | Uses current editable expected date, not the original commitment |
-| `on_time_dated_completion_fraction` | On-time recorded completions / dated recorded completions | Candidate only with denominator and legacy/date-coverage warning |
-| `payment_records`, `recorded_receipts_inr` | Payment rows with receivedAt inside the window; sum their amount in whole INR | Retained recorded receipts, NOT revenue, lifetime collections, or bank reconciliation |
-| `enquiry_created_records` | Stored enquiries with createdAt inside the window, all current statuses | Recorded arrivals, NOT unique leads, all submissions, or visitor conversion |
+| `task_created_records` | Non-null Task.createdAt inside window | Excludes unknown dates and deleted tickets |
+| `currently_done_completion_records` | Currently done tasks with non-null completedAt inside window | Latest current completion episode, not every completion transition |
+| `dated_currently_done_completion_records` | Previous cohort with non-null expectedCompletion | Dated-completion denominator |
+| `on_time_currently_done_completion_records` | Dated completion cohort whose local completion day is on/before expected UTC date | Uses current editable expected date, not original commitment |
+| `on_time_dated_completion_fraction` | On-time recorded completions / dated recorded completions | Requires date/legacy coverage warnings and both counts |
+| `payment_records`, `recorded_receipts_inr` | Retained Payment rows whose receivedAt falls in window; sum amount in INR | Stated receipt date, not entry time; removal and ticket deletion restate history |
+| `enquiry_created_records` | Surviving enquiries whose createdAt falls in window, all current statuses | Stored arrivals, not all attempts, unique leads, or visitor conversion |
 
-### Legacy rows, reopened tasks, and deleted history
+### Legacy timestamps, reopening, and audit history
 
-Task creation/completion columns are nullable, without migration defaults or backfill.
-`tasks_missing_created_at` counts unknown creation times across all tasks.
-`done_tasks_missing_completed_at` counts currently done tasks without a completion stamp.
-Null means unknown/unset; it does not prove a row predates deployment. Seeds and direct writes can also omit timestamps.
-Do not replace nulls with updatedAt, migration dates, expected dates, or the report date.
-A legacy task can gain a valid latest completion stamp while its creation time stays null; it enters completion but not creation counts.
+Task creation/completion columns are nullable without migration defaults or backfill.
+tasks_missing_created_at counts unknown creation dates; done_tasks_missing_completed_at counts done tasks with unknown completion dates.
+NULL means unknown/unset, not proof of a pre-migration row. Never impute dates from updatedAt, migrations, expected dates, or report dates.
+A legacy task can acquire a completion stamp while creation stays unknown; it enters completion but not creation counts.
+Creating work already done stamps both fields. Moving to done stamps completedAt; remaining done preserves it.
+Leaving done clears the stamp; recompletion replaces it. A no-op done update does not repair a legacy NULL completion stamp.
+Past window counts can fall or move between days. Expected-date edits can restate on-time fractions.
+The current-row query cannot establish first completion, every transition, active cycle time, reopen rate, or individual productivity.
 
-Creation already in done stamps both fields. A transition to done stamps completedAt; repeated done preserves it.
-Leaving done clears completedAt. Completing again replaces the previous completion time.
-A no-op done update does not repair a legacy null completion stamp.
-Consequently reopening can reduce a past window count, and recompletion can move a task between windows.
-These counts cannot prove immutable throughput, every completion event, first completion, reopen rate, active cycle time, or employee productivity.
-Expected-date edits can also change the apparent on-time fraction after the work finishes.
+ActivityLog now supplies append-only API action history with timestamps, actors, and changes; it supersedes the earlier no-activity-history source limit.
+Personal sign-in can identify an actor; shared sign-in identifies only the shared role. API log records can outlive tickets and removed payments.
+However, direct database writes/migrations bypass API logging, historical actions are not backfilled, and environment cutover remains unverified.
+Old client actions and new ticket actions coexist in the log. Task.client text and audit summaries are not safe historical join keys.
+This query intentionally does not read or grant ActivityLog, which contains private text, amounts, IPs, and user agents.
+Separate audit-based aggregates need model-aware definitions, privacy review, and verified cutover; their existence does not make these snapshot flows immutable.
+No adoption, retention, login, or employee-performance KPI is implemented here.
 
-Record Payment now creates Payment history and reduces due in one transaction. This supersedes the earlier balance-only workflow limitation.
-The API accepts backdated or future receivedAt values; the window is the stated receipt date, not entry/ingestion time.
-Payment has no separate creation timestamp or actor. Late entries can restate earlier days.
-Deleting a client cascades to all its payments, including earlier windows. Direct balance edits create no payment history.
-The source cannot reconcile original invoice value, retained receipts, and current due or recover deleted payments.
-Do not describe falling balances as collections or retained receipt sums as complete historical cash flow.
+### Receipt removal, ticket deletion, and migration loss
 
-Enquiries have server-created timestamps and mutable current status. Deleting an enquiry reduces earlier arrival counts.
-Honeypot requests return success without storage; validation failures, rate-limited requests, and deleted rows are absent.
-No visitor denominator, deduplication identity, contact timestamp, closure timestamp, or enquiry-to-client link exists.
-Arrival counts therefore do not prove conversion, response time, contact rate by day, or unique qualified leads.
+Record Payment creates a task-linked Payment without changing fee. Receipt dates can be backdated or future-dated; there is no Payment creation timestamp.
+Late entry can restate an earlier receipt day. Fee edits can change current outstanding without any receipt.
+Explicit payment removal deletes the row: retained receipts fall and the surviving ticket's outstanding can rise.
+Removing a payment is not a negative Payment row in this query. The API records payment.removed in ActivityLog, outside these aggregates.
+Deleting a ticket cascades to all its Payment rows and removes its fee, balance, workload, and timestamp-window contribution.
+The deletion API records a snapshot and payment details in ActivityLog; this query does not reconstruct those deleted records.
 
-Personal sign-in can identify an employee in a token; shared office/admin sign-in does not identify a person.
-Neither path stores a login/activity event ledger. Tasks store assignee, not actor; payments and enquiries store no authenticated actor.
-Do not infer adoption, activation, retention, attendance, or individual activity from assignment or password provisioning.
-The reporting query never reads passwordHash, credentials, tokens, phones, or free text.
+The ticket migration explicitly runs DELETE FROM Payment before replacing clientId with taskId and drops Client entirely.
+It does not assign old payments or balances to tickets, infer fees, or reconstruct customer relations. Existing task fee and lastReminder values start NULL.
+The migration comment calls former rows sample data; no production inspection here verifies their contents or safety.
+Treat prior-payment removal as a model/history reset, NOT refunded money, negative collections, new paid work, or operational improvement.
 
-## Migration cutover and comparison contract
+## Cutover and historical-comparison contract
 
-Sources: [payments migration](../../apps/backend/prisma/migrations/20261111062411_add_payments/migration.sql),
-[task timestamps migration](../../apps/backend/prisma/migrations/20261111062932_add_task_timestamps/migration.sql),
-[enquiries migration](../../apps/backend/prisma/migrations/20261111070013_add_enquiries/migration.sql), and
-[personal passwords migration](../../apps/backend/prisma/migrations/20261111073557_add_personal_passwords/migration.sql).
-Migration filenames are source identifiers, NOT verified application cutover times.
-No historical payment or enquiry backfill occurs. The task migration leaves existing timestamps null.
-Confirm each environment's migration application AND API deployment time before publishing timestamp-window candidates.
-Source availability starts at the later of those times; office use and any imports also need confirmation.
+Migration files describe schema operations, not verified environment deployment times.
+Verify each relevant migration application AND API rollout: task timestamps, enquiries, ActivityLog if used elsewhere, and ticket receivables.
+For ticket money/reminder coverage, use the later of the ticket migration and compatible API rollout, plus confirmed office adoption/import policy.
+Do not assume the SQL file date or earliest surviving receipt proves complete coverage.
+Mark pre-cutover windows unavailable and cutover days partial. Full-day coverage starts at the next local midnight after cutover.
+A cutover exactly at local midnight can qualify that day after completeness checks.
+The query does not infer a cutoff or certify completeness. Until verified, all timestamp windows remain provisional, including zero outputs.
+Backdated post-cutover receipts do not restore earlier-model history or prove complete pre-cutover coverage.
 
-Mark days before cutover **unavailable** and cutover days **partial**. Start full-day reporting at the first local midnight after cutover.
-If cutover is exactly local midnight, that new day can qualify after completeness checks.
-The query intentionally does not guess a cutover, filter by a migration filename, or certify completeness.
-Until the owner verifies cutover, every timestamp-window result is diagnostic/provisional, even zero.
-A backdated payment before cutover does not prove full coverage of that earlier day.
-The presence of a timestamp does not establish completeness for other records in its cohort.
-
-Compare the three timestamp windows only with matching definition version, source, timezone, verified cutover coverage, and quality checks.
-Do not compare a partial or unavailable window with a full day. Label results as mutable retained-row counts/sums.
-Current-stock comparisons require trusted aggregate snapshots at the same local observation time, on prior day and seven days earlier.
-Do not reconstruct past stocks from current rows. Do not compare version 1 snapshots directly with version 2 outputs.
-No snapshot store or schedule is added here. No freshness watermark verifies office use of the API.
-Mock-mode activity is not persisted to this database and is outside all query cohorts.
+Do not compare version 1/2 Client balances, client counts, overdue categories, lastCall proxies, or client-linked receipt totals with version 3 ticket metrics.
+Even identically named receipt keys have a different relation and a destructive history boundary. No valid bridge exists by customer name.
+Do not splice old/new totals, compute cross-model growth rates, or describe a model-reset difference as business performance.
+Post-reset baselines require the same version/model, source, cohort, timezone, verified full-day coverage, and quality gates.
+D-1/D-2/D-8 windows can still restate through late entry, explicit removal, and deletion; label them retained-row observations.
+Current-stock comparisons require approved same-time aggregate snapshots. Current rows cannot reconstruct historical closing balances.
+No snapshot store or schedule is added here. Mock-mode changes do not reach this database, and source freshness remains unverified.
 
 ## Quality and publication gates
 
-Inspect these flags before publication; stop affected reporting until the owner checks nonzero defects:
+Inspect flags before publication. Stop affected reporting until the owner checks nonzero defects:
 
-- `invalid_task_status_records`, `invalid_client_status_records`, `invalid_enquiry_status_records`: unknown current status values.
-- `paid_positive_balance_records`: paid status with positive due; UI validation rejects it, but legacy/API/direct writes can produce it.
-- `negative_balance_records`, `nonpositive_payment_records`: invalid amounts; raw totals retain them, so fractions can be invalid.
-- `future_last_call_records`, `future_task_timestamp_records`, `future_payment_records`, `future_enquiry_records`: timestamps later than observation.
-- `non_done_tasks_with_completed_at`: a completion stamp on a task not currently done.
-- `task_completion_before_creation_records`: completion earlier than a known creation time.
+- invalid_task_status_records and invalid_enquiry_status_records: unexpected current statuses.
+- negative_fee_tasks: fee below zero; known_fees_inr retains the invalid value.
+- fees_below_received_tasks: retained receipts exceed a known fee; outstanding still clamps at zero like the app.
+- payments_on_unset_fee_tasks: any payment rows attached to an unknown fee.
+- nonpositive_payment_records: zero/negative receipt rows, which raw totals retain.
+- future_last_reminder_tasks, future_task_timestamp_records, future_payment_records, future_enquiry_records: future instants.
+- non_done_tasks_with_completed_at and task_completion_before_creation_records: inconsistent task timestamp state.
 
-Missing task timestamps are coverage warnings, not automatically corrupt rows. Show both missing counts beside candidate task flows.
-The query reports defects but does not silently fix values, suppress output, or implement publication policy.
-These checks do not detect all direct-write defects, deleted history, demo records, or incomplete ingestion.
+Missing task timestamps and unknown fees are coverage warnings, not automatically corrupt data.
+These checks do not detect all direct-write defects, removed history, demo records, or incomplete ingestion.
+The query exposes defects; it does not repair data, suppress output, or implement publication policy.
 
-## Safe execution and output
+## Restricted role and exact wrapper
 
-Use an approved reporting role, not application-owner credentials. Financial output is admin-only; do not widen current app access rules.
-Keep the aggregate report in an owner-approved restricted audience. Small cohorts can still reveal sensitive information.
-Do not add customer, employee, district, department, or auth-mode breakdowns to shared output.
-The query returns no customer names, IDs, phones, notes, task text, payment notes, or employee credentials.
+Use approved reporting credentials, not the application-owner connection. Financial output stays restricted to an owner-approved admin audience.
+Keep only aggregate output; no names, IDs, contact fields, notes, task text, password hashes, or audit payloads enter the report.
+The role can read individual permitted source columns; only this query enforces aggregate-only output. Keep its credentials private.
 
-### One-time administrator role setup (separate from reporting)
+### Administrator setup, separate from reporting
 
-Connect to the intended database as an authorized administrator through `psql -X`.
-Use a new role without memberships. Do not grant Neon owner or application-role membership.
-The column grants below avoid granting access to Employee.passwordHash or other private text.
+Connect to the intended database as an authorized administrator through psql -X.
+The tested example requires a new role without memberships. Stop if the role already exists and review its grants separately.
 
 ```sql
 CREATE ROLE nk_metrics_reader LOGIN
@@ -181,40 +201,35 @@ SELECT format('GRANT CONNECT ON DATABASE %I TO nk_metrics_reader', current_datab
 \gexec
 GRANT USAGE ON SCHEMA public TO nk_metrics_reader;
 GRANT SELECT (id) ON TABLE public."Employee" TO nk_metrics_reader;
-GRANT SELECT (status, priority, "assigneeId", "expectedCompletion", "createdAt", "completedAt") ON TABLE public."Task" TO nk_metrics_reader;
-GRANT SELECT (due, status, "lastCall") ON TABLE public."Client" TO nk_metrics_reader;
-GRANT SELECT (amount, "receivedAt") ON TABLE public."Payment" TO nk_metrics_reader;
+GRANT SELECT (id, status, priority, "assigneeId", "expectedCompletion", "createdAt", "completedAt", fee, "lastReminder") ON TABLE public."Task" TO nk_metrics_reader;
+GRANT SELECT ("taskId", amount, "receivedAt") ON TABLE public."Payment" TO nk_metrics_reader;
 GRANT SELECT (status, "createdAt") ON TABLE public."Enquiry" TO nk_metrics_reader;
 ALTER ROLE nk_metrics_reader SET default_transaction_read_only = on;
 ```
 
-In the same psql session, run `\password nk_metrics_reader` through the hidden prompt. Do not paste passwords into SQL or shell history.
-Use the reporting connection string for `REPORTING_DATABASE_URL` with the provider's required TLS settings.
-Existing version 1 roles need an administrator permission review: revoke previous broad table SELECT grants before applying column grants.
-Adding column grants alone does not remove existing table-level access to passwordHash or text.
-Inspect inherited PUBLIC privileges and existing grants. Do not change shared PUBLIC grants without a separate access review.
-The read-only default is only a safeguard: a role can override its own transaction mode. Permissions must enforce the boundary.
-The role can still read individual permitted source columns; only this query enforces aggregate-only output. Keep credentials private.
-
-### Run the report
+Set the password with `\password nk_metrics_reader` through the hidden prompt. Do not put secrets into SQL, shell history, or reports.
+Use the provider's required TLS settings for REPORTING_DATABASE_URL. No Client grant belongs in current setup.
+Do not grant ActivityLog, private text, passwordHash, broad table SELECT, owner membership, or application-role membership.
+Existing reporting roles need explicit removal/review of earlier table and column grants; adding narrow grants does not remove old access.
+Inspect inherited PUBLIC privileges. Do not change shared PUBLIC grants without a separate access review.
+The read-only default is only a safeguard: a role can override its own transaction mode. Permissions must deny writes independently.
 
 ```sh
 psql -X "$REPORTING_DATABASE_URL" --set=ON_ERROR_STOP=1 \
   --file=apps/backend/reporting/run-operational-metrics.psql
 ```
 
-The wrapper uses read-only repeatable-read execution, a five-second statement limit, a one-second lock limit, and `pg_catalog, public, pg_temp` search path.
-Use one connection and no concurrent runs. It creates no objects and performs no persistent writes.
-A timeout or missing table/column/permission is a failed report, not zero. Install and verify all source migrations first.
-Never run migration, seed, or test commands against production for reporting setup.
+The exact wrapper uses read-only repeatable-read execution, five-second statement and one-second lock limits, and pg_catalog, public, pg_temp search path.
+Use one connection and no concurrent reporting runs. It creates no objects and performs no persistent writes.
+Missing tables/columns/permissions or timeout means failed reporting, not zero. Current source migrations must already exist in the reporting environment.
+Never run migration, seed, or test commands against production for report setup. This PR performs no merge, deployment, or production operation.
 
-## Owner decisions and verification
+## Verification and owner decisions
 
-Confirm authoritative API/database use, demo exclusions, verified per-source cutover, reporting timezone, audience, schedule-coverage gate, and stamp-age threshold.
-Choose candidates only after those checks. No KPI, reporting schedule, or production readiness is approved by this document.
-Reports must identify definition version, observation time, source, window dates, cutover status, denominators, quality flags, and known restatement risks.
-Distinguish observed aggregate changes from hypotheses and missing data.
+[Reporting tests](../../apps/backend/test/reporting.test.js) use isolated synthetic PostgreSQL tables and execute the actual ticket migration on a synthetic old-model fixture.
+They cover unknown/zero fees, aggregation without fanout, derived status, payment removal, task cascade, migration loss, date windows, legacy nulls, reopening, and read-only execution.
+Independent verification replays current migrations on fresh and upgrade synthetic databases and runs the exact wrapper with the documented restricted role.
+Run repository checks only against a disposable local database. No test certifies production cutover or approved KPIs.
 
-[Reporting tests](../../apps/backend/test/reporting.test.js) use isolated synthetic PostgreSQL tables.
-They cover empty cohorts, exact output allowlists, date boundaries, legacy nulls, reopened tasks, deletion cascades, receipts, enquiries, and read-only execution.
-Run `npm run check` only against a disposable local test database. Independent psql testing verifies the wrapper and restricted role.
+The owner must confirm source authority, demo exclusions, model cutover, date coverage, audience, timezone, and candidate selection before publication.
+Every report must identify definition/model version, observation time, window dates, source, cutover status, denominators, quality flags, and restatement limits.
