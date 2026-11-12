@@ -358,6 +358,17 @@ test('ticket migration deletes prior client payments without mapping fees or his
       VALUES ('legacy', 'PRIVATE', 'PRIVATE', 'todo', 'low', 'e', now())`;
     await tx.$executeRaw`INSERT INTO "Client" (id) VALUES ('old-client')`;
     await tx.$executeRaw`INSERT INTO "Payment" (id, "clientId", amount) VALUES (1, 'old-client', 75)`;
+    const [targets] = await tx.$queryRawUnsafe(`SELECT
+      to_regclass('"Task"') = to_regclass('pg_temp."Task"') AS task_is_temp,
+      to_regclass('"Client"') = to_regclass('pg_temp."Client"') AS client_is_temp,
+      to_regclass('"Payment"') = to_regclass('pg_temp."Payment"') AS payment_is_temp,
+      to_regclass('"Payment_clientId_idx"') = to_regclass('pg_temp."Payment_clientId_idx"') AS index_is_temp,
+      to_regclass('"Task"') <> to_regclass('public."Task"') AS task_not_public,
+      to_regclass('"Payment"') <> to_regclass('public."Payment"') AS payment_not_public`);
+    assert.deepEqual(targets, {
+      task_is_temp: true, client_is_temp: true, payment_is_temp: true,
+      index_is_temp: true, task_not_public: true, payment_not_public: true,
+    });
     const migration = await readFile(new URL('../prisma/migrations/20261111133000_receivables_by_ticket/migration.sql', import.meta.url), 'utf8');
     // This migration contains simple SQL statements, no function bodies.
     const statements = migration.split('\n').filter((line) => !line.trim().startsWith('--')).join('\n').split(';').map((s) => s.trim()).filter(Boolean);

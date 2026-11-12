@@ -143,7 +143,8 @@ Removing a payment is not a negative Payment row in this query. The API records 
 Deleting a ticket cascades to all its Payment rows and removes its fee, balance, workload, and timestamp-window contribution.
 The deletion API records a snapshot and payment details in ActivityLog; this query does not reconstruct those deleted records.
 
-The ticket migration explicitly runs DELETE FROM Payment before replacing clientId with taskId and drops Client entirely.
+The ticket migration source specifies DELETE FROM Payment before replacing clientId with taskId and dropping Client.
+This describes source behavior, not evidence that production executed the migration. Production cutover remains unverified.
 It does not assign old payments or balances to tickets, infer fees, or reconstruct customer relations. Existing task fee and lastReminder values start NULL.
 The migration comment calls former rows sample data; no production inspection here verifies their contents or safety.
 Treat prior-payment removal as a model/history reset, NOT refunded money, negative collections, new paid work, or operational improvement.

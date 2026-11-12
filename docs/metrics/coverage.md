@@ -26,7 +26,8 @@ This reporting PR changes no application behavior, instrumentation, schema, dash
 
 - Client no longer exists. Task.client is free text, not a customer foreign key. Do not restore Client SQL or join by customer name.
 - Payment.taskId replaces Payment.clientId. Current fees and outstanding are ticket-level, not old client balances.
-- The [ticket migration](../../apps/backend/prisma/migrations/20261111133000_receivables_by_ticket/migration.sql) deletes ALL prior Payment rows before changing the relation.
+- The [ticket migration source](../../apps/backend/prisma/migrations/20261111133000_receivables_by_ticket/migration.sql) specifies deletion of ALL prior Payment rows before changing the relation.
+- This is source behavior, not evidence of production execution. Production cutover remains unverified.
 - The migration drops Client and adds nullable Task.fee/lastReminder. It supplies no old-to-new mapping, fee backfill, or payment carryover.
 - Source comments call old rows sample data. No live-data inspection here verifies that assertion; reporting must acknowledge the deletion boundary regardless.
 - Version 1/2 balance, client count, overdue category, lastCall, and old-linked receipt baselines are not comparable with version 3 ticket metrics.
